@@ -16,7 +16,7 @@ Built with Swift, SwiftUI, Swift Concurrency, AVFoundation, Metal, Core ML, and 
 - **Fall back safely** — when correction confidence is low, the original frame passes through untouched
 - **Publish** — exposes the processed frames as a native virtual camera any conferencing app can select
 
-Calibration is optional and never required.
+Calibration is optional and never required. The app works out of the box on any supported Mac with a built-in or external camera.
 
 ---
 
