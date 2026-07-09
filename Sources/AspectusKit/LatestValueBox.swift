@@ -1,7 +1,9 @@
 import Foundation
 
-/// single-slot drop-stale hand-off from capture to processing, capacity is one in-flight frame
-/// offer overwrites and counts a drop rather than queuing; this is how we keep latency low
+/// Single-slot, drop-stale hand-off from capture to processing.
+///
+/// Capacity is exactly one in-flight frame: `offer(_:)` overwrites any unread value and
+/// increments `dropped` rather than queuing, keeping pipeline latency bounded by design.
 public final class LatestValueBox<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: Value?
