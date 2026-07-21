@@ -1,0 +1,48 @@
+name: Aspectus
+options:
+  bundleIdPrefix: com.aspectus
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+packages:
+  AspectusKit:
+    path: .
+
+targets:
+  Aspectus:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+    dependencies:
+      - package: AspectusKit
+        product: AspectusKit
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Aspectus
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: "14.0"
+        NSCameraUsageDescription: "Aspectus needs the camera to capture and correct your gaze."
+        NSHighResolutionCapable: true
+        NSPrincipalClass: NSApplication
+    entitlements:
+      path: App/Aspectus.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.device.camera: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aspectus.app
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: false
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        ENABLE_HARDENED_RUNTIME: true
+        MTL_ENABLE_DEBUG_INFO: INCLUDE_SOURCE

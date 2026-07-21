@@ -1,0 +1,12 @@
+# Xcode / SwiftPM build artifacts
+.build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# XcodeGen output — regenerate with `xcodegen generate`
+Aspectus.xcodeproj/
+.swiftpm/
+
+# macOS
+.DS_Store
