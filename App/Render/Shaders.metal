@@ -37,3 +37,57 @@ fragment float4 preview_fragment(VOut in [[stage_in]],
     constexpr sampler s(address::clamp_to_edge, filter::linear);
     return tex.sample(s, in.uv);
 }
+
+// MARK: - geometric eye warp
+
+struct EyeWarpUniforms {
+    float2 leftCenter;
+    float2 rightCenter;
+    float2 leftRadius;         // ellipse radii, a circle in pixel space
+    float2 rightRadius;
+    float2 leftDisplacement;   // sampling offset at the centre, zero at the boundary
+    float2 rightDisplacement;
+    float  irisPlateau;        // fraction of the radius that moves rigidly before the ramp starts
+};
+
+// no mirror and no aspect-fill: correction output must be geometrically identical to the source,
+// mirroring is a preview-only display choice
+vertex VOut warp_vertex(uint vid [[vertex_id]]) {
+    float2 positions[6] = {
+        float2(-1.0, -1.0), float2( 1.0, -1.0), float2(-1.0,  1.0),
+        float2(-1.0,  1.0), float2( 1.0, -1.0), float2( 1.0,  1.0)
+    };
+    float2 uvs[6] = {
+        float2(0.0, 1.0), float2(1.0, 1.0), float2(0.0, 0.0),
+        float2(0.0, 0.0), float2(1.0, 1.0), float2(1.0, 0.0)
+    };
+    VOut out;
+    out.position = float4(positions[vid], 0.0, 1.0);
+    out.uv = uvs[vid];
+    return out;
+}
+
+// flat across the iris so it translates rigidly like a rotating eyeball, then ramps to zero over
+// the surrounding sclera; ramping from the centre instead would stretch the iris into an oval
+static inline float2 eye_offset(float2 uv, float2 center, float2 radius,
+                                float2 displacement, float plateau) {
+    float r = length((uv - center) / radius);
+    if (r >= 1.0) { return float2(0.0); }
+    return displacement * (1.0 - smoothstep(plateau, 1.0, r));
+}
+
+fragment float4 eye_warp_fragment(VOut in [[stage_in]],
+                                  texture2d<float> tex [[texture(0)]],
+                                  constant EyeWarpUniforms& u [[buffer(0)]]) {
+    float2 offset = eye_offset(in.uv, u.leftCenter, u.leftRadius, u.leftDisplacement, u.irisPlateau)
+                  + eye_offset(in.uv, u.rightCenter, u.rightRadius, u.rightDisplacement, u.irisPlateau);
+
+    // outside both influence ellipses the source texel is returned verbatim, so "modifies only
+    // the eye region" is exact rather than approximate — no resampling error leaks into the face
+    if (offset.x == 0.0 && offset.y == 0.0) {
+        return tex.read(uint2(in.position.xy));
+    }
+
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    return tex.sample(s, in.uv + offset);
+}

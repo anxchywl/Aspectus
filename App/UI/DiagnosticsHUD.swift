@@ -12,6 +12,8 @@ struct DiagnosticsHUD: View {
             Divider().overlay(Color.white.opacity(0.2))
             row("track lat", String(format: "%.1f / %.1f ms", controller.trackingMeanMs, controller.trackingP95Ms),
                 warn: controller.trackingP95Ms >= 16)
+            row("warp lat", String(format: "%.1f / %.1f ms", controller.correctionMeanMs, controller.correctionP95Ms),
+                warn: controller.correctionP95Ms >= 8)
             row("proc lat", String(format: "%.1f / %.1f ms", controller.processingMeanMs, controller.processingP95Ms),
                 warn: controller.processingP95Ms >= 20)
             row("e2e lat", String(format: "%.1f / %.1f ms", controller.endToEndMeanMs, controller.endToEndP95Ms))
@@ -25,6 +27,10 @@ struct DiagnosticsHUD: View {
             } else {
                 row("face", "none", warn: true)
             }
+            row("gaze", String(format: "%.1f°", controller.gazeDegrees))
+            row("correct", String(format: "%.0f%%", controller.correctionWeight * 100))
+            row("iris move", String(format: "%.1f px", controller.irisTravelPixels),
+                warn: controller.correctionWeight > 0.5 && controller.irisTravelPixels < 2)
             row("dropped", "\(controller.droppedFrames)")
             row("in-flight", "\(controller.inFlight)")
             row("memory", String(format: "%.0f MB", controller.memoryMB))
@@ -34,6 +40,10 @@ struct DiagnosticsHUD: View {
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.7))
                 .lineLimit(2)
+            Text(controller.correctorName)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.7))
+                .lineLimit(1)
         }
         .padding(10)
         .frame(width: 240, alignment: .leading)

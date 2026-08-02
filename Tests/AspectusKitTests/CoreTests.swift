@@ -32,6 +32,45 @@ final class LatestValueBoxTests: XCTestCase {
         let v = await waiter.value
         XCTAssertNil(v, "finish must resume a parked waiter with nil")
     }
+
+    func testDepthNeverExceedsOne() async {
+        let box = LatestValueBox<Int>()
+        XCTAssertEqual(box.depth, 0, "an empty box has no queued frame")
+        box.offer(1)
+        XCTAssertEqual(box.depth, 1)
+        box.offer(2)
+        box.offer(3)
+        XCTAssertEqual(box.depth, 1, "overwriting must never grow the slot")
+        _ = await box.take()
+        XCTAssertEqual(box.depth, 0, "take drains the slot")
+    }
+
+    func testFinishedBoxStaysClosedUntilReopen() async {
+        let box = LatestValueBox<Int>()
+        box.finish()
+        XCTAssertTrue(box.isFinished)
+        box.offer(7)
+        XCTAssertEqual(box.depth, 0, "a finished box must not accept frames")
+        let closed = await box.take()
+        XCTAssertNil(closed)
+
+        box.reopen()
+        XCTAssertFalse(box.isFinished)
+        box.offer(8)
+        let v = await box.take()
+        XCTAssertEqual(v, 8, "reopen must make the box usable again for a restarted session")
+    }
+
+    func testReopenDiscardsStaleValueAndKeepsCounters() async {
+        let box = LatestValueBox<Int>()
+        box.offer(1)
+        box.offer(2)          // one drop
+        XCTAssertEqual(box.dropped, 1)
+        box.finish()
+        box.reopen()
+        XCTAssertEqual(box.depth, 0, "a frame from the previous session must not survive restart")
+        XCTAssertEqual(box.dropped, 1, "counters are process-lifetime, not per session")
+    }
 }
 
 final class OneEuroFilterTests: XCTestCase {
