@@ -35,6 +35,25 @@ struct ContentView: View {
                     set: { controller.showOverlay = $0 }))
             }
             ToolbarItem(placement: .automatic) {
+                Toggle("Correct", isOn: Binding(
+                    get: { controller.correctionEnabled },
+                    set: { controller.correctionEnabled = $0 }))
+                .help("Toggle gaze correction to compare against the original frame")
+            }
+            ToolbarItem(placement: .automatic) {
+                HStack(spacing: 6) {
+                    Text("Amount")
+                    Slider(value: Binding(get: { controller.redirectDegrees },
+                                          set: { controller.redirectDegrees = $0 }),
+                           in: 0...18)
+                        .frame(width: 110)
+                        .accessibilityLabel("Gaze correction amount in degrees")
+                    Text(String(format: "%.0f°", controller.redirectDegrees))
+                        .monospacedDigit()
+                }
+                .help("Angle between your screen and the camera lens")
+            }
+            ToolbarItem(placement: .automatic) {
                 Button(controller.isRunning ? "Stop" : "Start") {
                     if controller.isRunning { controller.stop() }
                     else { Task { await controller.start() } }

@@ -1,4 +1,5 @@
-import AVFoundation
+// AVFoundation is not Sendable-audited, the session and device are confined to this type
+@preconcurrency import AVFoundation
 import CoreVideo
 import AspectusKit
 
@@ -26,10 +27,10 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     func configure(preferredDeviceID: String? = nil) throws {
-        session.beginConfiguration()
-        defer { session.commitConfiguration() }
+        // a stop finished the box permanently, reopen before the delegate can fire again
+        output.reopen()
 
-        session.sessionPreset = .high
+        session.beginConfiguration()
 
         let device: AVCaptureDevice?
         if let id = preferredDeviceID {
@@ -38,52 +39,88 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
                 ?? AVCaptureDevice.default(for: .video)
         }
-        guard let device else { throw CaptureError.noDevice }
+        guard let device else {
+            session.commitConfiguration()
+            throw CaptureError.noDevice
+        }
 
         // reconfigure / device-switch path
         session.inputs.forEach { session.removeInput($0) }
         session.outputs.forEach { session.removeOutput($0) }
 
-        let input = try AVCaptureDeviceInput(device: device)
-        guard session.canAddInput(input) else { throw CaptureError.cannotAddInput }
+        let input: AVCaptureDeviceInput
+        do {
+            input = try AVCaptureDeviceInput(device: device)
+        } catch {
+            session.commitConfiguration()
+            throw error
+        }
+        guard session.canAddInput(input) else {
+            session.commitConfiguration()
+            throw CaptureError.cannotAddInput
+        }
         session.addInput(input)
 
         // 60 fps may be unreachable on a given Mac, it is a hardware/format cap
-        Self.selectBestFormat(for: device, targetFPS: 60)
+        Self.selectFormat(for: device, target: Self.targetFormat)
 
         videoOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
         ]
         videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.setSampleBufferDelegate(self, queue: sampleQueue)
-        guard session.canAddOutput(videoOutput) else { throw CaptureError.cannotAddOutput }
+        guard session.canAddOutput(videoOutput) else {
+            session.commitConfiguration()
+            throw CaptureError.cannotAddOutput
+        }
         session.addOutput(videoOutput)
 
+        session.commitConfiguration()
+
+        // macOS does not expose inputPriority and the header leaves preset-vs-activeFormat
+        // precedence unspecified here, so the pin is read back rather than assumed
         let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
-        let maxFPS = device.activeFormat.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
-        activeFormatDescription = "\(device.localizedName) \(dims.width)×\(dims.height)@\(Int(maxFPS)) BGRA"
+        let fps = 1.0 / CMTimeGetSeconds(device.activeVideoMinFrameDuration)
+        activeFormatDescription = "\(device.localizedName) \(dims.width)×\(dims.height)@\(Int(fps.rounded())) BGRA"
     }
 
-    // highest supported frame rate, ties broken by pixel count, pinned so the camera runs at its ceiling
-    private static func selectBestFormat(for device: AVCaptureDevice, targetFPS: Double) {
-        let scored = device.formats.compactMap { format -> (AVCaptureDevice.Format, Double, Int32)? in
+    /// the benchmark operating point, fixed so latency numbers are comparable across runs
+    struct TargetFormat {
+        let width: Int32
+        let height: Int32
+        let fps: Double
+    }
+
+    static let targetFormat = TargetFormat(width: 1280, height: 720, fps: 60)
+
+    /// pins the format nearest the target, preferring an exact match then the smallest format that
+    /// still reaches the target rate, so the latency budget is not spent on unnecessary pixels
+    private static func selectFormat(for device: AVCaptureDevice, target: TargetFormat) {
+        let candidates = device.formats.compactMap { format -> (AVCaptureDevice.Format, Double, Int32, Int32)? in
             let maxRate = format.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
             guard maxRate > 0 else { return nil }
             let d = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-            return (format, maxRate, d.width * d.height)
+            return (format, maxRate, d.width, d.height)
         }
-        // prefer formats that reach the target then the largest, else the fastest available
-        let best = scored.filter { $0.1 >= targetFPS }.max { ($0.2, $0.1) < ($1.2, $1.1) }
-            ?? scored.max { ($0.1, $0.2) < ($1.1, $1.2) }
-        guard let best else { return }
+        guard !candidates.isEmpty else { return }
+
+        let atTargetRate = candidates.filter { $0.1 >= target.fps }
+        let exact = atTargetRate.first { $0.2 == target.width && $0.3 == target.height }
+        // pixel distance from the target keeps the choice deterministic across cameras
+        let nearest = (atTargetRate.isEmpty ? candidates : atTargetRate).min {
+            abs(Int($0.2) * Int($0.3) - Int(target.width) * Int(target.height))
+                < abs(Int($1.2) * Int($1.3) - Int(target.width) * Int(target.height))
+        }
+        guard let chosen = exact ?? nearest else { return }
+
         do {
             try device.lockForConfiguration()
-            device.activeFormat = best.0
-            let rate = min(targetFPS, best.1)
-            let duration = CMTime(value: 1, timescale: CMTimeScale(rate))
+            defer { device.unlockForConfiguration() }
+            device.activeFormat = chosen.0
+            let rate = min(target.fps, chosen.1)
+            let duration = CMTime(value: 1, timescale: CMTimeScale(rate.rounded()))
             device.activeVideoMinFrameDuration = duration
             device.activeVideoMaxFrameDuration = duration
-            device.unlockForConfiguration()
         } catch {
             // non-fatal, keep the default active format
         }
@@ -91,7 +128,8 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     func start() {
         guard !session.isRunning else { return }
-        sampleQueue.async { [session] in session.startRunning() }
+        // startRunning blocks for tens of ms, keep it off the caller's thread
+        sampleQueue.async { [self] in session.startRunning() }
         isRunning = true
     }
 

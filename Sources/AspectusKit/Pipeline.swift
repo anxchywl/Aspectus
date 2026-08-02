@@ -15,7 +15,9 @@ public protocol GazeEstimator: Sendable {
 }
 
 /// implementations must modify only the smallest practical region and leave the rest untouched
-public protocol EyeCorrector: Sendable {
+/// Pixels is a primary associated type so the orchestrator can hold a corrector as an existential
+/// and stay ignorant of which model or framework implements it
+public protocol EyeCorrector<Pixels>: Sendable {
     associatedtype Pixels: Sendable
     func correct(_ pixels: Pixels,
                  tracking: TrackingResult,

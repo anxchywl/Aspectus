@@ -17,6 +17,11 @@ public final class LatestValueBox<Value: Sendable>: @unchecked Sendable {
     public var dropped: Int { lock.withLock { droppedCount } }
     public var delivered: Int { lock.withLock { deliveredCount } }
 
+    /// occupancy of the single slot, 0 or 1, the only honest source for the queue-depth readout
+    public var depth: Int { lock.withLock { stored == nil ? 0 : 1 } }
+
+    public var isFinished: Bool { lock.withLock { finished } }
+
     public func offer(_ value: Value) {
         let resume: CheckedContinuation<Value?, Never>?
         lock.lock()
@@ -53,6 +58,14 @@ public final class LatestValueBox<Value: Sendable>: @unchecked Sendable {
             waiter = cont
             lock.unlock()
         }
+    }
+
+    /// reopens a finished box so a stopped capture session can be restarted
+    /// lifetime counters are deliberately not reset, they describe the process not the session
+    public func reopen() {
+        lock.lock(); defer { lock.unlock() }
+        finished = false
+        stored = nil
     }
 
     /// closes the box and resumes any parked waiter with nil, keeps shutdown prompt

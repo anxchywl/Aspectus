@@ -2,11 +2,20 @@ import Metal
 import MetalKit
 import CoreVideo
 import simd
+import AspectusKit
 
 /// draws a CVPixelBuffer to an MTKView as a zero-copy Metal texture via CVMetalTextureCache
 /// aspect-fill and mirror happen in the shader, no per-frame allocations beyond command buffers
-final class MetalRenderer: NSObject, MTKViewDelegate {
+@MainActor
+final class MetalRenderer: NSObject {
     private struct Uniforms { var uvScale: SIMD2<Float>; var uvOffset: SIMD2<Float>; var mirror: UInt32 }
+
+    /// timing travels with the pixels so latency is attributed to the frame that was actually
+    /// presented, not to whichever frame happened to be newest when the GPU finished
+    private struct PendingFrame {
+        let pixelBuffer: CVPixelBuffer
+        let timing: FrameTiming
+    }
 
     let device: MTLDevice
     private let queue: MTLCommandQueue
@@ -16,10 +25,16 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     // display choice for self-view, does not affect what the virtual camera outputs
     var mirror = true
 
-    private let frameLock = NSLock()
-    private var pending: CVPixelBuffer?
+    private var pending: PendingFrame?
 
-    var onPresented: (() -> Void)?
+    // an MTLTexture is only valid while its CVMetalTexture lives, and the GPU reads it until the
+    // command buffer completes; the drawable pool is 3 deep so holding 3 outlives any in-flight read
+    private var retainedTextures: [CVMetalTexture] = []
+    private static let drawablePoolDepth = 3
+
+    /// fires off the main actor once the drawable is on screen, carrying that frame's own timing
+    /// and the present timestamp in the HostClock base
+    var onPresented: (@Sendable (FrameTiming, Double) -> Void)?
 
     // weak so the view can be driven without owning the frame source
     weak var attachedView: MTKView?
@@ -54,24 +69,34 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         self.attachedView = mtkView
     }
 
-    func enqueue(_ pixelBuffer: CVPixelBuffer, view: MTKView) {
-        frameLock.lock(); pending = pixelBuffer; frameLock.unlock()
+    func enqueue(_ pixelBuffer: CVPixelBuffer, timing: FrameTiming, view: MTKView) {
+        pending = PendingFrame(pixelBuffer: pixelBuffer, timing: timing)
         view.draw()
     }
 
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+    /// releases GPU resources held across a stop so a restart starts clean
+    func flush() {
+        pending = nil
+        retainedTextures.removeAll()
+        CVMetalTextureCacheFlush(textureCache, 0)
+    }
 
-    func draw(in view: MTKView) {
-        frameLock.lock(); let pb = pending; frameLock.unlock()
-        guard let pb,
-              let drawable = view.currentDrawable,
+    private func render(in view: MTKView) {
+        // take-once, so a redraw that is not driven by a new frame cannot double-count latency
+        guard let frame = pending else { return }
+        pending = nil
+
+        guard let drawable = view.currentDrawable,
               let rpd = view.currentRenderPassDescriptor,
-              let cmd = queue.makeCommandBuffer() else { return }
+              let cmd = queue.makeCommandBuffer(),
+              let cvTexture = makeTexture(from: frame.pixelBuffer),
+              let texture = CVMetalTextureGetTexture(cvTexture) else { return }
 
-        guard let texture = makeTexture(from: pb) else { return }
+        retainedTextures.append(cvTexture)
+        if retainedTextures.count > Self.drawablePoolDepth { retainedTextures.removeFirst() }
 
-        let w = Float(CVPixelBufferGetWidth(pb))
-        let h = Float(CVPixelBufferGetHeight(pb))
+        let w = Float(CVPixelBufferGetWidth(frame.pixelBuffer))
+        let h = Float(CVPixelBufferGetHeight(frame.pixelBuffer))
         let dw = Float(view.drawableSize.width)
         let dh = Float(view.drawableSize.height)
         var u = aspectFill(texW: w, texH: h, viewW: dw, viewH: dh)
@@ -82,8 +107,17 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         enc.setFragmentTexture(texture, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         enc.endEncoding()
+
+        // presentedTime shares the mach base with HostClock, so present latency needs no conversion
+        let timing = frame.timing
+        let notify = onPresented
+        drawable.addPresentedHandler { presented in
+            // presentedTime is 0 when the frame never reached the screen, e.g. the window was
+            // occluded; counting those yields a latency of minus the machine's uptime
+            guard presented.presentedTime > 0 else { return }
+            notify?(timing, presented.presentedTime)
+        }
         cmd.present(drawable)
-        cmd.addCompletedHandler { [weak self] _ in self?.onPresented?() }
         cmd.commit()
     }
 
@@ -103,15 +137,24 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         return Uniforms(uvScale: scale, uvOffset: .zero, mirror: mirror ? 1 : 0)
     }
 
-    private func makeTexture(from pb: CVPixelBuffer) -> MTLTexture? {
+    private func makeTexture(from pb: CVPixelBuffer) -> CVMetalTexture? {
         let width = CVPixelBufferGetWidth(pb)
         let height = CVPixelBufferGetHeight(pb)
         var cvTexture: CVMetalTexture?
         let status = CVMetalTextureCacheCreateTextureFromImage(
             kCFAllocatorDefault, textureCache, pb, nil,
             .bgra8Unorm, width, height, 0, &cvTexture)
-        guard status == kCVReturnSuccess, let cvTexture,
-              let tex = CVMetalTextureGetTexture(cvTexture) else { return nil }
-        return tex
+        guard status == kCVReturnSuccess else { return nil }
+        return cvTexture
+    }
+}
+
+extension MetalRenderer: MTKViewDelegate {
+    nonisolated func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+
+    // MTKViewDelegate is not actor-annotated, but the view is paused with setNeedsDisplay off, so
+    // the only draws come from enqueue on the main actor
+    nonisolated func draw(in view: MTKView) {
+        MainActor.assumeIsolated { render(in: view) }
     }
 }
