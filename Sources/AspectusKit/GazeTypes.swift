@@ -23,13 +23,32 @@ public struct NormRect: Sendable, Equatable {
     }
 }
 
+/// where the pupil centre actually came from, since a contour centroid and a real pupil landmark
+/// have very different accuracy and the difference is otherwise invisible downstream
+public enum PupilSource: String, Sendable, Equatable, CaseIterable {
+    case visionLandmark
+    case contourCentroid
+    case none
+}
+
 /// per-eye geometry from the tracking stage
 public struct EyeObservation: Sendable {
     public var region: NormRect          // tight bbox of the eye opening
     public var pupilCenter: NormPoint    // detected pupil / iris center
     public var openness: Double          // 0 closed (blink), 1 fully open
-    public init(region: NormRect, pupilCenter: NormPoint, openness: Double) {
+    public var pupilSource: PupilSource
+    public var pupilPointCount: Int      // landmark points behind pupilCenter, 0 for a fallback
+    public init(region: NormRect, pupilCenter: NormPoint, openness: Double,
+                pupilSource: PupilSource = .none, pupilPointCount: Int = 0) {
         self.region = region; self.pupilCenter = pupilCenter; self.openness = openness
+        self.pupilSource = pupilSource; self.pupilPointCount = pupilPointCount
+    }
+
+    /// pupil displacement from the aperture centre, the quantity the whole gaze estimate rests on
+    /// and the one carrying the eyelid bias, so it is worth reading directly rather than inferring
+    public var pupilOffset: NormPoint {
+        let c = region.center
+        return NormPoint(x: pupilCenter.x - c.x, y: pupilCenter.y - c.y)
     }
 }
 
@@ -48,10 +67,14 @@ public struct TrackingResult: Sendable {
     public var rightEye: EyeObservation
     public var headPose: HeadPose
     public var confidence: Double
+    /// false when the tracker had no yaw/pitch to report and substituted zero, which would make
+    /// every head-pose gate silently inert rather than protective
+    public var headPoseAvailable: Bool
     public init(faceBounds: NormRect, leftEye: EyeObservation, rightEye: EyeObservation,
-                headPose: HeadPose, confidence: Double) {
+                headPose: HeadPose, confidence: Double, headPoseAvailable: Bool = true) {
         self.faceBounds = faceBounds; self.leftEye = leftEye
         self.rightEye = rightEye; self.headPose = headPose; self.confidence = confidence
+        self.headPoseAvailable = headPoseAvailable
     }
 }
 

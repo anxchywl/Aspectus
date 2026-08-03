@@ -23,6 +23,9 @@ public struct CorrectionGate: Sendable {
     }
 
     public private(set) var config: Config
+    /// the angle-limit scaling applied on the last update, exposed because a partial factor is
+    /// otherwise indistinguishable from low confidence — both just show up as a smaller blend
+    public private(set) var lastAngleFactor: Double = 1.0
     private var engaged = false
     private var weight: Double = 0
     private var lastTime: Double?
@@ -50,6 +53,7 @@ public struct CorrectionGate: Sendable {
             let over = angle - config.maxCorrectionDegrees
             angleFactor = max(0.0, 1.0 - over / 6.0)
         }
+        lastAngleFactor = angleFactor
 
         let target = (engaged ? config.maxStrength : 0.0) * angleFactor
 

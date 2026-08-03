@@ -54,7 +54,9 @@ public struct TemporalStabilizer: Sendable {
             let p = pupil.filter(x: e.pupilCenter.x, y: e.pupilCenter.y, t: t)
             return EyeObservation(region: region.filter(e.region, t: t),
                                   pupilCenter: NormPoint(x: p.x, y: p.y),
-                                  openness: e.openness)
+                                  openness: e.openness,
+                                  pupilSource: e.pupilSource,
+                                  pupilPointCount: e.pupilPointCount)
         }
 
         mutating func reset() { region.reset(); pupil.reset() }
@@ -99,7 +101,8 @@ public struct TemporalStabilizer: Sendable {
                               headPose: HeadPose(yaw: yaw.filter(tracking.headPose.yaw, t: t),
                                                  pitch: pitch.filter(tracking.headPose.pitch, t: t),
                                                  roll: roll.filter(tracking.headPose.roll, t: t)),
-                              confidence: tracking.confidence)
+                              confidence: tracking.confidence,
+                              headPoseAvailable: tracking.headPoseAvailable)
     }
 
     /// gaze is filtered separately because it is derived, and its own cutoff is lower
