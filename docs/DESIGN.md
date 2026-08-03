@@ -146,7 +146,65 @@ licence-clean baseline behind the `EyeCorrector` seam, not the final quality tar
 
 - Output FPS latches at its last value when the window is occluded instead of decaying to zero,
   because the rate meter is only ticked from the drawable-presented callback.
-- Whether Vision supplies true pupil landmarks or falls back to the eye-contour centroid is
-  unconfirmed; the tracker accepts either and the difference affects correction accuracy.
+- ~~Whether Vision supplies true pupil landmarks or falls back to the eye-contour centroid is
+  unconfirmed.~~ **Resolved by measurement** (phase 1 diagnostics, release build, M3 / macOS 26.6,
+  FaceTime HD at 1280×720): `leftPupil`/`rightPupil` are populated on **100 % of tracked frames**,
+  one point per eye, over two runs. The contour-centroid fallback never fired. It remains in the
+  tracker as a guard and is now reported in diagnostics rather than being silent.
+- `VNFaceObservation.confidence` measures **exactly 1.000** (min, mean and max) on every tracked
+  frame, so the gate's 0.6/0.4 confidence hysteresis never fires on that input alone. Only the
+  per-eye agreement factor (0.5 when one eye is unusable) ever moves it. The gate is correct; the
+  signal feeding it carries no information.
+- ~~**Vision supplies no head yaw or pitch.**~~ **Diagnosed and fixed.** A landmarks-only request
+  reported head pose on **0 % of tracked frames**, making both the runtime 25° and calibration 15°
+  limits inert. Cause: the SDK documents `roll`/`yaw`/`pitch` as populated by
+  `VNDetectFaceRectanglesRequest`, not by the landmarks request. Fix: run rectangles at revision 3
+  first, then chain the observation into the landmarks request via `inputFaceObservations`.
+  Measured after: **100 % availability**, yaw spanning −40.1°…+28.9°, and the head-pose gate firing
+  on 10 of 70 sampled frames — the first time it has ever engaged.
+  - Cost of the second Vision pass, measured: tracking mean 11.7 → 16.5 ms, p95 ≈ 25 ms, and
+    dropped frames 1 → 17 over a comparable run. Still inside the 33 ms frame interval, but the
+    margin is now thin. One 593 ms tracking outlier was recorded at startup and is unexplained.
+- **The estimate is contaminated by head pose.** With pose visible: when head pitch reached +22.8°,
+  raw gaze pitch swung to −34.5°, driving a requested correction of 51.9° that the angle limit
+  correctly cut to zero blend. The centred-pupil model has no head-pose term, so head rotation
+  leaks directly into the gaze reading.
+  - **Compensation implemented, coefficients not yet measured on hardware.** An uncontrolled run
+    could not identify them: head rotation and eye-in-head rotation are confounded when the eyes
+    move freely, and the correlations came out weak (r = 0.15…0.49) with the *strongest* term being
+    a physically odd cross coupling (head pitch → gaze yaw, r = −0.49). Fitting that would encode
+    incidental behaviour, not geometry.
+  - The identifiable experiment is a **fixation sweep**: the user holds their gaze on the lens while
+    rotating their head, so true gaze is zero on every sample and the raw reading is pure
+    contamination. This is now a sixth calibration step, fitting a 2×2 linear map
+    (`HeadCoupling`) by least squares on the mean-centred head angles.
+  - Every sign is measured rather than assumed, which matters because Vision reports **pitch
+    positive when nodding down** while this codebase treats **positive pitch as looking up**, and
+    yaw's documented "counterclockwise" is ambiguous for a face. The fit refuses collinear head
+    motion (a single direction of travel leaves the two axes indistinguishable), spans under 12°,
+    fewer than 40 samples, and any slope outside ±2.
+  - The sweep is skippable, and skipping it leaves behaviour byte-for-byte unchanged.
+- ~~Per-axis scale is measured and wrong in opposite directions.~~ **Quantified and fitted.**
+  From a 300-sample calibration on a 326.6 × 211.4 mm built-in display (`CGDisplayScreenSize`),
+  refitted offline against real target geometry: at a 550 mm viewing distance the estimator needs
+  **yawGain 0.53** and **pitchGain 2.70** — horizontal over-reads ~1.9×, vertical under-reads
+  ~2.7×. Both inside the 0.2…4.0 plausibility band the fitter enforces.
+  - Gain fitting is now implemented, but it depends on a **user-supplied viewing distance**:
+    macOS exposes no camera field of view (`videoFieldOfView` and
+    `videoFieldOfView(for:geometricDistortionCorrected:)` are both `API_UNAVAILABLE(macos)`), so
+    scale cannot be recovered from the image. Sensitivity, measured: over 450–700 mm the fitted
+    yawGain spans 0.64…0.42 and pitchGain 3.23…2.16, so a ±100 mm distance error moves the gain by
+    roughly 10–20%.
+  - Yaw is fitted from the two side targets and pitch from the lens (exactly 0°) plus the bottom
+    edge. The "look above the camera" target is off the display, has no measurable position, and is
+    therefore a sign/separation check only — never an input to the fit.
+- An earlier reading of 0.9° vertical separation was a **procedure artifact**, not a property of
+  the estimator: the calibration flow was sampling during the saccade to each target, averaging
+  "up" and "down" toward each other. A 2 s settle window per target raised it to 9.7°.
+- The vertical estimate carries a measured systematic bias: the pupil sits above the eye-aperture
+  bounding-box centre on every frame of a run (normalized offset mean −0.0018 left, −0.0021 right),
+  which reads as a constant **≈ +4° of apparent upward gaze** (raw pitch stayed within +2.2°…+5.7°
+  and never went negative). This is the eyelid occlusion effect and is what phase 2 calibration
+  has to remove.
 - No handling yet for camera disconnect, session runtime errors, or sleep/wake.
 - Restart after stop is fixed and unit-tested, but not yet verified end-to-end on hardware.
