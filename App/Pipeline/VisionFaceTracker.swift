@@ -17,20 +17,34 @@ struct VisionFaceTracker: FaceTracker {
         }
     }
 
+    /// two passes, because the SDK documents roll/yaw/pitch as populated by
+    /// VNDetectFaceRectanglesRequest, and a landmarks-only request measured 0% pose availability
+    ///
+    /// the rectangles observation is fed to the landmarks request through VNFaceObservationAccepting,
+    /// which copies it and fills in the landmarks, so the pose angles survive onto the result
     private static func detect(_ pixelBuffer: CVPixelBuffer) -> TrackingResult? {
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+
+        let rectangles = VNDetectFaceRectanglesRequest()
+        rectangles.revision = VNDetectFaceRectanglesRequestRevision3
+        do {
+            try handler.perform([rectangles])
+        } catch {
+            return nil
+        }
+        // primary face is the largest bounding box
+        guard let primary = rectangles.results?.max(by: { $0.boundingBox.area < $1.boundingBox.area })
+        else { return nil }
+
         let request = VNDetectFaceLandmarksRequest()
         request.revision = VNDetectFaceLandmarksRequestRevision3
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+        request.inputFaceObservations = [primary]
         do {
             try handler.perform([request])
         } catch {
             return nil
         }
-        guard let faces = request.results, !faces.isEmpty else { return nil }
-
-        // primary face is the largest bounding box
-        guard let face = faces.max(by: { $0.boundingBox.area < $1.boundingBox.area }),
-              let landmarks = face.landmarks else { return nil }
+        guard let face = request.results?.first, let landmarks = face.landmarks else { return nil }
 
         let box = face.boundingBox // normalized, origin bottom-left
 
@@ -48,19 +62,37 @@ struct VisionFaceTracker: FaceTracker {
         let rightEyePts = region(landmarks.rightEye)
         guard !leftEyePts.isEmpty, !rightEyePts.isEmpty else { return nil }
 
-        let leftPupil = center(of: region(landmarks.leftPupil)) ?? center(of: leftEyePts)!
-        let rightPupil = center(of: region(landmarks.rightPupil)) ?? center(of: rightEyePts)!
+        // Vision declares both pupil regions nullable and gives no guarantee that revision 3
+        // populates them, so which source won has to be reported rather than assumed
+        func pupil(_ r: VNFaceLandmarkRegion2D?,
+                   contour: [NormPoint]) -> (NormPoint, PupilSource, Int) {
+            let pts = region(r)
+            if let c = center(of: pts) { return (c, .visionLandmark, pts.count) }
+            return (center(of: contour)!, .contourCentroid, 0)
+        }
+
+        let (leftPupil, leftSource, leftCount) = pupil(landmarks.leftPupil, contour: leftEyePts)
+        let (rightPupil, rightSource, rightCount) = pupil(landmarks.rightPupil, contour: rightEyePts)
 
         let left = EyeObservation(region: boundingRect(leftEyePts),
                                   pupilCenter: leftPupil,
-                                  openness: openness(eyePoints: leftEyePts))
+                                  openness: openness(eyePoints: leftEyePts),
+                                  pupilSource: leftSource,
+                                  pupilPointCount: leftCount)
         let right = EyeObservation(region: boundingRect(rightEyePts),
                                    pupilCenter: rightPupil,
-                                   openness: openness(eyePoints: rightEyePts))
+                                   openness: openness(eyePoints: rightEyePts),
+                                   pupilSource: rightSource,
+                                   pupilPointCount: rightCount)
 
-        let pose = HeadPose(yaw: Double(truncating: face.yaw ?? 0),
-                            pitch: Double(truncating: face.pitch ?? 0),
-                            roll: Double(truncating: face.roll ?? 0))
+        // read from the rectangles observation: the landmarks copy is documented to carry the
+        // pose through, but the original is the object that actually computed it
+        let pose = HeadPose(yaw: Double(truncating: face.yaw ?? primary.yaw ?? 0),
+                            pitch: Double(truncating: face.pitch ?? primary.pitch ?? 0),
+                            roll: Double(truncating: face.roll ?? primary.roll ?? 0))
+        // a nil yaw or pitch becomes zero, which reads downstream as a perfectly square head and
+        // would make the head-pose limit unfireable, so the absence has to travel with the result
+        let poseAvailable = (face.yaw ?? primary.yaw) != nil && (face.pitch ?? primary.pitch) != nil
 
         let confidence = Double(face.confidence)
 
@@ -71,7 +103,8 @@ struct VisionFaceTracker: FaceTracker {
                                   height: Double(box.height))
 
         return TrackingResult(faceBounds: faceBounds, leftEye: left, rightEye: right,
-                              headPose: pose, confidence: confidence)
+                              headPose: pose, confidence: confidence,
+                              headPoseAvailable: poseAvailable)
     }
 
     // MARK: - geometry helpers

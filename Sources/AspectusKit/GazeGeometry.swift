@@ -68,6 +68,23 @@ public enum GazeGeometry {
         return (eye.pupilCenter.x - c.x, eye.pupilCenter.y - c.y)
     }
 
+    /// one eye's gaze angles in radians, nil when that eye alone cannot be trusted
+    ///
+    /// exposed separately because calibration has to compare the two eyes against each other:
+    /// averaging them first hides exactly the disagreement that marks a bad sample
+    public static func eyeAngles(_ eye: EyeObservation,
+                                 imageAspect: Double,
+                                 tuning: EyeWarpTuning = .init()) -> (yaw: Double, pitch: Double)? {
+        guard imageAspect > 0, eye.openness >= tuning.minOpenness,
+              let offset = pupilOffset(eye) else { return nil }
+        let radiusInEyeWidths = tuning.eyeballRadiusPerEyeWidth * eye.region.width
+        guard radiusInEyeWidths > 1e-6 else { return nil }
+        // image y is normalized against height, so it needs the aspect to become a pixel ratio
+        let sinYaw = offset.x / radiusInEyeWidths
+        let sinPitch = offset.y / (radiusInEyeWidths * imageAspect)
+        return (-asin(max(-1, min(1, sinYaw))), -asin(max(-1, min(1, sinPitch))))
+    }
+
     /// nil when the geometry cannot be trusted: degenerate eye region, closed eyes, or a head
     /// turn large enough to invalidate the centred-pupil assumption
     ///
@@ -77,24 +94,15 @@ public enum GazeGeometry {
                                 imageAspect: Double,
                                 tuning: EyeWarpTuning = .init()) -> GazeEstimate? {
         guard imageAspect > 0 else { return nil }
-        let degrees = 180.0 / Double.pi
-        let pose = tracking.headPose
-        let worstPose = max(abs(pose.yaw), abs(pose.pitch)) * degrees
-        guard worstPose <= tuning.maxHeadPoseDegrees else { return nil }
+        // an unavailable pose reads as a perfectly square head, so the limit is only meaningful
+        // when the tracker actually supplied one; the diagnostics report availability separately
+        guard !exceedsHeadPoseLimit(tracking, tuning: tuning) else { return nil }
 
-        var yaws: [Double] = []
-        var pitches: [Double] = []
-        for eye in [tracking.leftEye, tracking.rightEye] {
-            guard eye.openness >= tuning.minOpenness,
-                  let offset = pupilOffset(eye) else { continue }
-            let radiusInEyeWidths = tuning.eyeballRadiusPerEyeWidth * eye.region.width
-            guard radiusInEyeWidths > 1e-6 else { continue }
-            // image y is normalized against height, so it needs the aspect to become a pixel ratio
-            let sinYaw = offset.x / radiusInEyeWidths
-            let sinPitch = offset.y / (radiusInEyeWidths * imageAspect)
-            yaws.append(-asin(max(-1, min(1, sinYaw))))
-            pitches.append(-asin(max(-1, min(1, sinPitch))))
+        let perEye = [tracking.leftEye, tracking.rightEye].compactMap {
+            eyeAngles($0, imageAspect: imageAspect, tuning: tuning)
         }
+        let yaws = perEye.map(\.yaw)
+        let pitches = perEye.map(\.pitch)
         guard !yaws.isEmpty else { return nil }
 
         let yaw = yaws.reduce(0, +) / Double(yaws.count)
@@ -102,6 +110,46 @@ public enum GazeGeometry {
         // both eyes agreeing is the strongest signal that the landmarks are real
         let agreement = yaws.count == 2 ? 1.0 : 0.5
         return GazeEstimate(yaw: yaw, pitch: pitch, confidence: tracking.confidence * agreement)
+    }
+
+    /// true when the head is turned past the trusted limit
+    ///
+    /// returns false when the tracker had no pose to report: zero would otherwise be indistinguishable
+    /// from a genuinely square head, and silently gating on a fabricated value is worse than
+    /// admitting the limit cannot be enforced. availability is surfaced in diagnostics instead
+    public static func exceedsHeadPoseLimit(_ tracking: TrackingResult,
+                                            tuning: EyeWarpTuning = .init()) -> Bool {
+        guard tracking.headPoseAvailable else { return false }
+        let degrees = 180.0 / Double.pi
+        let worst = max(abs(tracking.headPose.yaw), abs(tracking.headPose.pitch)) * degrees
+        return worst > tuning.maxHeadPoseDegrees
+    }
+
+    /// names the geometric gate that would suppress correction, for diagnostics only
+    ///
+    /// deliberately mirrors the guards in `estimate` and `warp` rather than sharing code with them:
+    /// it runs only on the passthrough path, so it must never be able to change what the hot path
+    /// decides. `requiringBothEyes` distinguishes the two thresholds — an estimate survives on one
+    /// usable eye, a warp does not
+    public static func rejection(_ tracking: TrackingResult,
+                                 imageAspect: Double,
+                                 tuning: EyeWarpTuning = .init(),
+                                 requiringBothEyes: Bool) -> FallbackReason {
+        guard imageAspect > 0 else { return .degenerateGeometry }
+        guard !exceedsHeadPoseLimit(tracking, tuning: tuning) else { return .headPose }
+
+        var usable = 0, closed = 0, degenerate = 0
+        for eye in [tracking.leftEye, tracking.rightEye] {
+            if eye.openness < tuning.minOpenness { closed += 1; continue }
+            guard eye.region.width > 1e-6, eye.region.height > 1e-6,
+                  tuning.eyeballRadiusPerEyeWidth * eye.region.width > 1e-6 else {
+                degenerate += 1; continue
+            }
+            usable += 1
+        }
+
+        if usable == 2 || (usable == 1 && !requiringBothEyes) { return .none }
+        return closed > 0 ? .eyesClosed : .degenerateGeometry
     }
 
     /// nil when either eye must be left untouched, which the caller turns into original-frame
