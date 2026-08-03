@@ -6,8 +6,9 @@ import AspectusKit
 /// wires capture → box → correction → Metal preview and publishes diagnostics for the HUD
 /// knows nothing about specific models, so phase 2/3 stages slot in without touching this file
 ///
-/// latency is reported as two numbers: processing (ingest → present, the < 20 ms target we own)
-/// and end-to-end (camera PTS → present, includes sensor delivery we cannot remove)
+/// latency is reported as three numbers: pipeline (ingest → corrected frame ready, the < 20 ms
+/// target we own and what the virtual camera will inherit), processing (ingest → present) and
+/// end-to-end (camera PTS → present) — the last two add compositor and sensor time we do not own
 @MainActor
 final class PipelineController: ObservableObject {
     @Published var captureFPS: Double = 0
@@ -26,19 +27,58 @@ final class PipelineController: ObservableObject {
     @Published var permissionDenied = false
 
     @Published var correctorName: String = "—"
-    @Published var correctionWeight: Double = 0
-    @Published var gazeDegrees: Double = 0
 
-    /// how far the iris actually moves on screen, the number whose being ~0 made the first
-    /// prototype invisible while every other metric looked healthy
-    @Published var irisTravelPixels: Double = 0
+    /// no learned model is in the correction path, so there is no version to report; stated
+    /// explicitly rather than left blank, which would read as "not wired up yet"
+    let modelVersion = "n/a — geometric warp"
 
-    // published per frame so the overlay stays smooth
+    /// every gaze number the HUD shows, sampled on the stats timer from the detached loop's
+    /// collector; angles are signed so a systematic bias is visible instead of being hidden by a
+    /// magnitude, and the distributions answer whether a gate ever actually fires
+    @Published var gaze: DiagnosticsCollector.Snapshot = .empty
+
+    /// the active calibration, nil when the install has never been calibrated or was reset
+    @Published private(set) var calibration: GazeCalibration?
+    /// non-nil only while a calibration flow is running
+    @Published private(set) var calibrationProgress: CalibrationProgress?
+    /// the outcome of the last completed or failed calibration, for user-visible feedback
+    @Published private(set) var calibrationResult: CalibrationOutcome?
+
+    struct CalibrationProgress: Equatable {
+        var target: CalibrationTarget
+        var targetProgress: Double
+        var overallProgress: Double
+        var rejection: CalibrationRejection?
+        /// the sweep has its own instructions and its own progress meter
+        var phase: CalibrationSession.Phase = .targets
+        var headMotionSpanYaw: Double = 0
+        var headMotionSpanPitch: Double = 0
+        /// counts down while the user is still moving their eyes to the new target
+        var settleRemaining: Double?
+        /// live reading for the current target, so a flat axis is visible as it happens
+        var currentMeans: CalibrationSession.TargetMeans?
+    }
+
+    enum CalibrationOutcome: Equatable {
+        case succeeded(GazeCalibration)
+        /// carries what each target actually read, so a failure explains itself
+        case failed(String, means: [CalibrationTarget: CalibrationSession.TargetMeans])
+        case cancelled
+    }
+
+    /// the only per-frame publish left: the overlay is a visual check on the landmarks themselves,
+    /// so it has to follow the pixels rather than a half-second timer. every numeric diagnostic
+    /// moved to refreshStats, which is what AGENTS §7 asks for
     @Published var tracking: TrackingResult?
     @Published var trackingMeanMs: Double = 0
     @Published var trackingP95Ms: Double = 0
     @Published var correctionMeanMs: Double = 0
     @Published var correctionP95Ms: Double = 0
+
+    /// ingest to corrected-frame-ready, the latency we own and the one the virtual camera will
+    /// inherit; processing/end-to-end both include compositor time the extension will not pay
+    @Published var pipelineMeanMs: Double = 0
+    @Published var pipelineP95Ms: Double = 0
     @Published var showOverlay = true
     @Published var imageWidth: Int = 0
     @Published var imageHeight: Int = 0
@@ -67,6 +107,17 @@ final class PipelineController: ObservableObject {
 
     private let redirectStore = OSAllocatedUnfairLock(initialState: 12.0)
 
+    /// read by the detached loop every frame; nil means run exactly as an uncalibrated install
+    private let activeCalibration = OSAllocatedUnfairLock<GazeCalibration?>(initialState: nil)
+    /// the running calibration flow, owned by the lock because the loop feeds it and the UI reads it
+    private let sessionStore = OSAllocatedUnfairLock<CalibrationSession?>(initialState: nil)
+    private let storage = CalibrationStore()
+
+    /// supplied by the user because macOS gives no camera field of view, so it cannot be measured;
+    /// the fitted gain is only as good as this number and the UI says so
+    @Published var viewingDistanceMM: Double = 550
+    private var calibrationTimer: Timer?
+
     private let capture = CameraCapture()
     private let tracker = VisionFaceTracker()
     private let config = PipelineConfig()
@@ -77,7 +128,9 @@ final class PipelineController: ObservableObject {
     private let processing = StageMetrics(name: "processing", window: 240)
     private let trackingMetrics = StageMetrics(name: "tracking", window: 240)
     private let correctionMetrics = StageMetrics(name: "correction", window: 240)
+    private let pipelineMetrics = StageMetrics(name: "pipeline", window: 240)
     private let e2e = StageMetrics(name: "end-to-end", window: 240)
+    private let diagnostics = DiagnosticsCollector()
     private weak var renderer: MetalRenderer?
 
     // fps meters updated on each event, snapshotted by the stats timer
@@ -91,6 +144,99 @@ final class PipelineController: ObservableObject {
     private var consumerTask: Task<Void, Never>?
     private var statsTimer: Timer?
     private let benchmark = BenchmarkRecorder.fromLaunchArguments()
+
+    init() {
+        // a stored calibration applies from the first frame, so a calibrated install behaves the
+        // same on relaunch as it did when it was calibrated
+        if let stored = storage.load() {
+            calibration = stored.calibration
+            activeCalibration.withLock { $0 = stored.calibration }
+        }
+    }
+
+    // MARK: - calibration
+
+    /// only ever called from an explicit user action, so calibration can never start silently
+    func startCalibration() {
+        guard isRunning else { return }
+        calibrationResult = nil
+        sessionStore.withLock { $0 = CalibrationSession() }
+        calibrationProgress = CalibrationProgress(target: CalibrationTarget.allCases[0],
+                                                  targetProgress: 0, overallProgress: 0,
+                                                  rejection: nil, settleRemaining: nil,
+                                                  currentMeans: nil)
+        calibrationTimer?.invalidate()
+        // faster than the stats timer because a rejection message the user cannot react to is
+        // useless; bounded and only alive for the duration of the flow
+        calibrationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshCalibration() }
+        }
+    }
+
+    /// finishes without the sweep, keeping the five-target fit and giving up head compensation
+    func skipHeadMotion() {
+        sessionStore.withLock { session in
+            guard session != nil else { return }
+            session!.skipHeadMotion()
+        }
+        refreshCalibration()
+    }
+
+    func cancelCalibration() {
+        endCalibrationFlow()
+        calibrationResult = .cancelled
+    }
+
+    /// removes the calibration from disk as well as from the running pipeline
+    func resetCalibration() {
+        endCalibrationFlow()
+        storage.delete()
+        calibration = nil
+        activeCalibration.withLock { $0 = nil }
+        calibrationResult = nil
+    }
+
+    private func endCalibrationFlow() {
+        calibrationTimer?.invalidate()
+        calibrationTimer = nil
+        sessionStore.withLock { $0 = nil }
+        calibrationProgress = nil
+    }
+
+    private func refreshCalibration() {
+        guard let session = sessionStore.withLock({ $0 }) else { return }
+        var settling: Double?
+        if case let .settling(remaining) = session.lastOutcome { settling = remaining }
+        let span = session.headMotionSpan
+        calibrationProgress = CalibrationProgress(
+            target: session.target,
+            targetProgress: session.phase == .headMotion
+                ? session.headMotionProgress : session.progressForTarget,
+            overallProgress: session.overallProgress,
+            rejection: settling == nil ? session.lastRejection : nil,
+            phase: session.phase,
+            headMotionSpanYaw: span.yaw,
+            headMotionSpanPitch: span.pitch,
+            settleRemaining: settling,
+            currentMeans: session.means(for: session.target))
+        guard session.isFinished else { return }
+
+        let means = session.allMeans
+        endCalibrationFlow()
+        do {
+            let geometry = DisplayGeometry.geometry(viewingDistanceMM: viewingDistanceMM)
+            let fitted = try session.fit(geometry: geometry)
+            try storage.save(.init(calibration: fitted, samples: session.samples))
+            calibration = fitted
+            activeCalibration.withLock { $0 = fitted }
+            calibrationResult = .succeeded(fitted)
+        } catch let failure as CalibrationFit.Failure {
+            calibrationResult = .failed(failure.description, means: means)
+        } catch {
+            calibrationResult = .failed("could not save the calibration: \(error.localizedDescription)",
+                                        means: means)
+        }
+    }
 
     func attach(renderer: MetalRenderer) {
         self.renderer = renderer
@@ -126,6 +272,9 @@ final class PipelineController: ObservableObject {
             : "passthrough (metal unavailable)"
         lastReceivedCount = capture.output.delivered + capture.output.dropped
         lastStatsTime = HostClock.seconds
+        // a restart must not report the previous session's distributions
+        diagnostics.reset()
+        gaze = .empty
         capture.start()
         isRunning = true
         startConsumer()
@@ -142,6 +291,15 @@ final class PipelineController: ObservableObject {
 
     /// the loop body runs off the main actor, hopping only to publish overlay state and to draw,
     /// since MTKView is main-actor bound; tracking and correction never touch the main actor
+    ///
+    /// Vision landmark detection costs ~20 ms, measured, and shrinking it would mean giving up the
+    /// pupil points correction depends on. So it runs concurrently with the warp instead of ahead
+    /// of it, and each frame is corrected using the previous frame's landmarks — one frame of
+    /// staleness, against ~20 ms of latency removed from the display path.
+    ///
+    /// the loop still awaits tracking before taking the next frame, so exactly one frame is ever
+    /// in flight; throughput is capped by max(tracking, frame interval), and tracking is faster
+    /// than the camera's 33 ms cadence
     private func startConsumer() {
         let box = capture.output
         let tracker = self.tracker
@@ -159,52 +317,57 @@ final class PipelineController: ObservableObject {
         let correctionSwitch = self.correctionSwitch
         let redirectStore = self.redirectStore
 
+        let pipelineMetrics = self.pipelineMetrics
+        let diagnostics = self.diagnostics
+        let activeCalibration = self.activeCalibration
+        let sessionStore = self.sessionStore
+
         consumerTask = Task.detached(priority: .userInitiated) { [weak self] in
+            // landmarks from the previous frame, which is what the current frame is corrected with
+            var applied: TrackingResult?
+            // capture time of the frame those landmarks came from, so staleness is measured
+            // against real frame spacing rather than assumed to be one interval
+            var appliedCapture: Double?
+
             while !Task.isCancelled, let frame = await box.take() {
                 let tStart = HostClock.seconds
-                let tr = await tracker.track(frame, header: frame.header)
-                trackingMetrics.record(ms: (HostClock.seconds - tStart) * 1000)
+                async let tracked = tracker.track(frame, header: frame.header)
 
                 let aspect = frame.header.height > 0
                     ? Double(frame.header.width) / Double(frame.header.height) : 1
-                let enabled = correctionSwitch.withLock { $0 }
+                // correction is suppressed while calibrating: the user is being asked to judge
+                // where they are looking, and warped eyes would make that impossible
+                let calibrating = sessionStore.withLock { $0 != nil }
+                let enabled = correctionSwitch.withLock { $0 } && !calibrating
+                let calibration = activeCalibration.withLock { $0 }
 
                 // filtering runs on the frame's own capture time, so smoothing and slew follow
                 // real frame spacing rather than however long our processing happened to take
                 let frameTime = frame.header.timing.captureHostTime
-
-                // losing the face invalidates the history, otherwise reacquisition blends the new
-                // position against wherever the face used to be and visibly slides into place
-                guard let tr else {
-                    stabilizer.reset()
-                    gate.forceFallback()
-                    let w = gate.update(confidence: 0, requestedCorrectionDegrees: 0, t: frameTime)
-                    await MainActor.run { [weak self] in
-                        guard let self else { return }
-                        self.processFPSValue = self.processMeter.tick(at: HostClock.seconds)
-                        self.tracking = nil
-                        self.correctionWeight = w
-                        self.gazeDegrees = 0
-                        self.irisTravelPixels = 0
-                        if let renderer = self.renderer, let view = renderer.attachedView {
-                            renderer.enqueue(frame.pixelBuffer, timing: frame.header.timing, view: view)
-                        }
-                    }
-                    continue
-                }
-
-                let stable = stabilizer.stabilize(tr, t: frameTime)
-                let gaze = enabled
-                    ? GazeGeometry.estimate(stable, imageAspect: aspect, tuning: warpTuning)
-                        .map { stabilizer.stabilize($0, t: frameTime) }
-                    : nil
-
                 let redirect = redirectStore.withLock { $0 } * .pi / 180.0
 
-                // the angle the gate judges is the total redirection, so the screen-to-lens term
-                // is subject to the same trusted-angle limit as the observed gaze
+                let rawGaze = enabled ? applied.flatMap {
+                    GazeGeometry.estimate($0, imageAspect: aspect, tuning: warpTuning)
+                } : nil
+                let gaze = rawGaze.map { raw in
+                    guard let calibration, let applied else { return raw }
+                    let degrees = 180.0 / Double.pi
+                    return calibration.apply(raw,
+                                             headYawDegrees: applied.headPose.yaw * degrees,
+                                             headPitchDegrees: applied.headPose.pitch * degrees,
+                                             headPoseAvailable: applied.headPoseAvailable)
+                }
+
+                // the vertical estimate carries a systematic upward bias: the upper lid covers the
+                // top of the iris, so the aperture's centre sits below the neutral pupil and every
+                // open eye reads as looking up. uncalibrated, subtracting that phantom angle
+                // cancels real correction, so pitch falls back to the configured screen-to-lens
+                // angle alone. a calibration measures the bias and removes it, which is what makes
+                // the closed-loop vertical term trustworthy again
+                let usePitch = calibration != nil
                 let request = gaze.map {
-                    CorrectionRequest(yawOffset: -$0.yaw, pitchOffset: -$0.pitch + redirect,
+                    CorrectionRequest(yawOffset: -$0.yaw,
+                                      pitchOffset: usePitch ? -$0.pitch + redirect : redirect,
                                       strength: 1)
                 }
 
@@ -214,41 +377,134 @@ final class PipelineController: ObservableObject {
                 let weight = gate.update(confidence: gaze?.confidence ?? 0,
                                          requestedCorrectionDegrees: request?.magnitudeDegrees ?? 0,
                                          t: frameTime)
+                let angleFactor = gate.lastAngleFactor
+                let engaged = gate.isEngaged
 
                 let cStart = HostClock.seconds
                 var corrected = frame
                 var travelPixels = 0.0
-                if let request, weight > 0 {
+                var correctionApplied = false
+                if let applied, let request, weight > 0 {
                     let scaled = CorrectionRequest(yawOffset: request.yawOffset,
                                                    pitchOffset: request.pitchOffset,
                                                    strength: weight * userStrength)
-                    corrected = (try? await corrector.correct(frame, tracking: stable,
+                    corrected = (try? await corrector.correct(frame, tracking: applied,
                                                               request: scaled,
                                                               header: frame.header)) ?? frame
                     correctionMetrics.record(ms: (HostClock.seconds - cStart) * 1000)
+                    // every corrector failure path returns its input, so buffer identity is the
+                    // only honest signal that the warp actually ran
+                    correctionApplied = corrected.pixelBuffer !== frame.pixelBuffer
 
-                    if let w = GazeGeometry.warps(stable, imageAspect: aspect, request: scaled,
+                    if let w = GazeGeometry.warps(applied, imageAspect: aspect, request: scaled,
                                                   tuning: warpTuning) {
                         travelPixels = GazeGeometry.displacementPixels(
                             w.left, width: frame.header.width, height: frame.header.height)
                     }
                 }
 
+                // ingest to corrected-frame-ready: our own cost, and what the virtual camera will
+                // see, with none of the compositor latency the preview's present time includes
+                pipelineMetrics.record(ms: (HostClock.seconds - frame.header.timing.ingestHostTime) * 1000)
+
+                let ageMs = appliedCapture.map { (frameTime - $0) * 1000 } ?? 0
+                let fallback = Self.fallbackReason(enabled: enabled, applied: applied,
+                                                   gaze: gaze, engaged: engaged,
+                                                   angleFactor: angleFactor, weight: weight,
+                                                   correctionApplied: correctionApplied,
+                                                   imageAspect: aspect, tuning: warpTuning)
+                let degrees = 180.0 / Double.pi
+                diagnostics.record(GazeSample(
+                    frameID: frame.header.id,
+                    left: applied.map { EyeSample($0.leftEye) },
+                    right: applied.map { EyeSample($0.rightEye) },
+                    headYawDegrees: (applied?.headPose.yaw ?? 0) * degrees,
+                    headPitchDegrees: (applied?.headPose.pitch ?? 0) * degrees,
+                    headRollDegrees: (applied?.headPose.roll ?? 0) * degrees,
+                    faceConfidence: applied?.confidence ?? 0,
+                    headPoseAvailable: applied?.headPoseAvailable ?? false,
+                    rawYawDegrees: (rawGaze?.yaw ?? 0) * degrees,
+                    rawPitchDegrees: (rawGaze?.pitch ?? 0) * degrees,
+                    gazeConfidence: gaze?.confidence,
+                    calibratedYawDegrees: calibration == nil ? nil : (gaze?.yaw ?? 0) * degrees,
+                    calibratedPitchDegrees: calibration == nil ? nil : (gaze?.pitch ?? 0) * degrees,
+                    requestedYawDegrees: (request?.yawOffset ?? 0) * degrees,
+                    requestedPitchDegrees: (request?.pitchOffset ?? 0) * degrees,
+                    requestedMagnitudeDegrees: request?.magnitudeDegrees ?? 0,
+                    angleFactor: angleFactor,
+                    blendStrength: weight,
+                    correctionAgeMs: ageMs,
+                    irisTravelPixels: travelPixels,
+                    fallback: fallback))
+
+                let overlay = applied
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.processFPSValue = self.processMeter.tick(at: HostClock.seconds)
-                    self.tracking = stable
-                    self.correctionWeight = weight
-                    self.gazeDegrees = gaze?.magnitudeDegrees ?? 0
-                    self.irisTravelPixels = travelPixels
+                    self.tracking = overlay
                     if self.imageWidth != frame.header.width { self.imageWidth = frame.header.width }
                     if self.imageHeight != frame.header.height { self.imageHeight = frame.header.height }
                     if let renderer = self.renderer, let view = renderer.attachedView {
                         renderer.enqueue(corrected.pixelBuffer, timing: frame.header.timing, view: view)
                     }
                 }
+
+                // awaiting here, after the frame is already on its way to the screen, is what keeps
+                // exactly one frame in flight while still taking tracking off the critical path
+                let tr = await tracked
+                trackingMetrics.record(ms: (HostClock.seconds - tStart) * 1000)
+
+                // losing the face invalidates the history, otherwise reacquisition blends the new
+                // position against wherever the face used to be and visibly slides into place
+                if let tr {
+                    applied = stabilizer.stabilize(tr, t: frameTime)
+                    appliedCapture = frameTime
+                } else {
+                    stabilizer.reset()
+                    applied = nil
+                    appliedCapture = nil
+                }
+
+                // calibration sees the same stabilized geometry the estimator will use next frame,
+                // so what it measures is what the runtime path actually reads
+                let forCalibration = applied
+                sessionStore.withLock { session in
+                    guard session != nil else { return }
+                    _ = session!.offer(forCalibration, imageAspect: aspect,
+                                       tuning: warpTuning, t: frameTime)
+                }
             }
         }
+    }
+
+    /// names the first gate that suppressed correction, in the order the pipeline applies them, so
+    /// a zero blend can be attributed instead of guessed at
+    ///
+    /// nonisolated and pure: it is called from the detached loop, never from the main actor
+    private nonisolated static func fallbackReason(enabled: Bool,
+                                                   applied: TrackingResult?,
+                                                   gaze: GazeEstimate?,
+                                                   engaged: Bool,
+                                                   angleFactor: Double,
+                                                   weight: Double,
+                                                   correctionApplied: Bool,
+                                                   imageAspect: Double,
+                                                   tuning: EyeWarpTuning) -> FallbackReason {
+        guard enabled else { return .disabled }
+        guard let applied else { return .noTracking }
+        guard gaze != nil else {
+            return GazeGeometry.rejection(applied, imageAspect: imageAspect,
+                                          tuning: tuning, requiringBothEyes: false)
+        }
+        guard engaged else { return .lowConfidence }
+        guard angleFactor > 0 else { return .angleLimit }
+        guard weight > 0 else { return .engaging }
+        guard correctionApplied else {
+            let geometric = GazeGeometry.rejection(applied, imageAspect: imageAspect,
+                                                   tuning: tuning, requiringBothEyes: true)
+            return geometric == .none ? .correctorFailed : geometric
+        }
+        return angleFactor < 1 ? .angleLimit : .none
     }
 
     private func startStatsTimer() {
@@ -273,6 +529,12 @@ final class PipelineController: ObservableObject {
         correctionMeanMs = c.meanMs
         correctionP95Ms = c.p95Ms
 
+        let pl = pipelineMetrics.snapshot()
+        pipelineMeanMs = pl.meanMs
+        pipelineP95Ms = pl.p95Ms
+
+        gaze = diagnostics.snapshot()
+
         processFPS = processFPSValue
         outputFPS = outputFPSValue
         droppedFrames = capture.output.dropped
@@ -291,9 +553,9 @@ final class PipelineController: ObservableObject {
         formatDescription = capture.activeFormatDescription
 
         benchmark?.record(.init(captureFPS: captureFPS, processFPS: processFPS, outputFPS: outputFPS,
-                                tracking: t, correction: c, processing: p, endToEnd: e,
+                                tracking: t, correction: c, pipeline: pl, processing: p, endToEnd: e,
                                 dropped: droppedFrames, depth: inFlight,
-                                memoryMB: memoryMB, thermal: thermalState))
+                                memoryMB: memoryMB, thermal: thermalState, gaze: gaze))
     }
 
     // MARK: - system telemetry

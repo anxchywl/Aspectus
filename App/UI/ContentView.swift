@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var controller = PipelineController()
+    @State private var showCalibration = false
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -54,11 +55,23 @@ struct ContentView: View {
                 .help("Angle between your screen and the camera lens")
             }
             ToolbarItem(placement: .automatic) {
+                Button(controller.calibration == nil ? "Calibrate" : "Calibrated") {
+                    showCalibration = true
+                }
+                .help(controller.calibration == nil
+                      ? "Measure how your eyes read relative to the camera"
+                      : "Recalibrate or reset the stored calibration")
+                .disabled(!controller.isRunning)
+            }
+            ToolbarItem(placement: .automatic) {
                 Button(controller.isRunning ? "Stop" : "Start") {
                     if controller.isRunning { controller.stop() }
                     else { Task { await controller.start() } }
                 }
             }
+        }
+        .sheet(isPresented: $showCalibration) {
+            CalibrationView(controller: controller)
         }
         .task { await controller.start() }
     }
