@@ -67,6 +67,9 @@ public struct GazeCalibration: Codable, Sendable, Equatable {
     /// nil when the gains were pinned rather than fitted, which the UI has to be able to say
     public var viewingDistanceMM: Double?
     public var gainFitted: Bool?
+    /// per axis, because one axis can be fitted while the other is refused
+    public var yawGainFitted: Bool?
+    public var pitchGainFitted: Bool?
     /// nil when the head-motion step was skipped, which means no compensation at all
     public var headCoupling: HeadCoupling?
 
@@ -81,6 +84,8 @@ public struct GazeCalibration: Codable, Sendable, Equatable {
                 createdAt: Date = Date(),
                 viewingDistanceMM: Double? = nil,
                 gainFitted: Bool? = nil,
+                yawGainFitted: Bool? = nil,
+                pitchGainFitted: Bool? = nil,
                 headCoupling: HeadCoupling? = nil) {
         self.version = version
         self.yawOffsetDegrees = yawOffsetDegrees
@@ -93,6 +98,8 @@ public struct GazeCalibration: Codable, Sendable, Equatable {
         self.createdAt = createdAt
         self.viewingDistanceMM = viewingDistanceMM
         self.gainFitted = gainFitted
+        self.yawGainFitted = yawGainFitted
+        self.pitchGainFitted = pitchGainFitted
         self.headCoupling = headCoupling
     }
 
@@ -217,23 +224,24 @@ public enum CalibrationFit {
             return numerator / denominator
         }
 
-        var yawGain = 1.0, pitchGain = 1.0, fitted = false
+        // each axis stands or falls on its own: an implausible slope on one is no reason to throw
+        // away a sound slope on the other, still less the neutral bias, which does not depend on
+        // geometry at all. an unusable axis degrades to 1.0 and is reported as unfitted
+        var yawGain = 1.0, pitchGain = 1.0
+        var yawFitted = false, pitchFitted = false
         if let geometry, geometry.isUsable {
-            let y = gain([.left, .right], offset: yawOffset, measured: \.yawDegrees) {
-                geometry.trueAngles($0)?.yaw
-            }
-            let p = gain([.center, .down], offset: pitchOffset, measured: \.pitchDegrees) {
-                geometry.trueAngles($0)?.pitch
-            }
-            if let y, let p {
-                guard gainBounds.contains(y), gainBounds.contains(p) else {
-                    throw Failure.implausibleGain(yaw: y, pitch: p)
-                }
+            if let y = gain([.left, .right], offset: yawOffset, measured: \.yawDegrees,
+                            truth: { geometry.trueAngles($0)?.yaw }), gainBounds.contains(y) {
                 yawGain = y
+                yawFitted = true
+            }
+            if let p = gain([.center, .down], offset: pitchOffset, measured: \.pitchDegrees,
+                            truth: { geometry.trueAngles($0)?.pitch }), gainBounds.contains(p) {
                 pitchGain = p
-                fitted = true
+                pitchFitted = true
             }
         }
+        let fitted = yawFitted || pitchFitted
 
         let calibration = GazeCalibration(yawOffsetDegrees: yawOffset,
                                           pitchOffsetDegrees: pitchOffset,
@@ -245,6 +253,8 @@ public enum CalibrationFit {
                                           createdAt: now,
                                           viewingDistanceMM: fitted ? geometry?.viewingDistanceMM : nil,
                                           gainFitted: fitted,
+                                          yawGainFitted: yawFitted,
+                                          pitchGainFitted: pitchFitted,
                                           headCoupling: headCoupling)
         guard calibration.isUsable else {
             throw Failure.implausibleOffset(yawDegrees: yawOffset, pitchDegrees: pitchOffset)

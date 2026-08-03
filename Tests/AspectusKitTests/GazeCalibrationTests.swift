@@ -557,16 +557,25 @@ final class CalibrationGainFitTests: XCTestCase {
         XCTAssertEqual(fitted.pitchOffsetDegrees, 5.38, accuracy: 1e-9)
     }
 
-    // a wildly wrong distance produces a wildly wrong slope, which must be refused rather than
-    // stored and applied to every later frame
-    func testImplausibleGainIsRefused() {
-        let fitGeometry = laptopGeometry(distanceMM: 550)
-        let samples = skewedSamples(yawSkew: 20.0, pitchSkew: 0.5, geometry: fitGeometry)
-        XCTAssertThrowsError(try CalibrationFit.fit(samples, geometry: fitGeometry)) { error in
-            guard case .implausibleGain = error as? CalibrationFit.Failure else {
-                return XCTFail("expected an implausible-gain failure, got \(error)")
-            }
-        }
+    // an implausible slope must be dropped on its own axis without taking the rest of a sound
+    // calibration down with it — amplifying noise by 20x is worse than not scaling at all
+    func testImplausibleGainDegradesToUnityOnThatAxisOnly() throws {
+        let g = laptopGeometry(distanceMM: 550)
+        let fitted = try CalibrationFit.fit(skewedSamples(yawSkew: 0.10, pitchSkew: 0.5, geometry: g),
+                                            geometry: g)
+        XCTAssertEqual(fitted.yawGain, 1.0, accuracy: 1e-12, "the refused axis falls back to unity")
+        XCTAssertEqual(fitted.yawGainFitted, false)
+        XCTAssertEqual(fitted.pitchGain, 2.0, accuracy: 1e-6, "the sound axis is still fitted")
+        XCTAssertEqual(fitted.pitchGainFitted, true)
+    }
+
+    func testAnImplausibleAxisNeverDiscardsTheNeutralBias() throws {
+        let g = laptopGeometry(distanceMM: 550)
+        let fitted = try CalibrationFit.fit(skewedSamples(yawSkew: 0.10, pitchSkew: 0.5,
+                                                          geometry: g, pitchBias: 5.0),
+                                            geometry: g)
+        XCTAssertEqual(fitted.pitchOffsetDegrees, 5.0, accuracy: 1e-9,
+                       "the bias does not depend on geometry and must survive a refused slope")
     }
 
     func testUnusableGeometryFallsBackToPinnedGain() throws {

@@ -199,10 +199,10 @@ struct CalibrationView: View {
                     line("left vs right", String(format: "%.1f°",
                                                  calibration.horizontalSeparationDegrees))
                     line("samples", "\(calibration.sampleCount)")
-                    line("scale", calibration.gainFitted == true
-                         ? String(format: "yaw ×%.2f, pitch ×%.2f",
-                                  calibration.yawGain, calibration.pitchGain)
-                         : "not fitted (×1.00)")
+                    line("scale yaw", String(format: "×%.2f%@", calibration.yawGain,
+                                              calibration.yawGainFitted == true ? "" : "  not fitted"))
+                    line("scale pitch", String(format: "×%.2f%@", calibration.pitchGain,
+                                               calibration.pitchGainFitted == true ? "" : "  not fitted"))
                     if let d = calibration.viewingDistanceMM {
                         line("at distance", String(format: "%.0f mm", d))
                     }
