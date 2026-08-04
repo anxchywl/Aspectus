@@ -17,6 +17,11 @@ final class VirtualCameraSink: @unchecked Sendable {
     private var started = false
     private var sequence: UInt64 = 0
     private var warnedAboutSize = false
+    /// back-to-back full-queue drops, which is what a far side that has gone away looks like
+    private var consecutiveDrops = 0
+
+    /// two seconds at 30 fps; a merely slow host drains again well inside this
+    private static let stallThreshold = 60
 
     private(set) var dropped = 0
     private(set) var sent = 0
@@ -63,6 +68,7 @@ final class VirtualCameraSink: @unchecked Sendable {
         queue = cmQueue.takeUnretainedValue()
         started = true
         sequence = 0
+        consecutiveDrops = 0
         log.info("connected to the virtual camera")
         return true
     }
@@ -74,6 +80,29 @@ final class VirtualCameraSink: @unchecked Sendable {
         CMIODeviceStopStream(deviceID, streamID)
         queue = nil
         started = false
+        consecutiveDrops = 0
+    }
+
+    /// rebuilds the connection when the extension process has been replaced under us
+    ///
+    /// a draining queue proves the far side is alive, so nothing is polled while frames flow; the
+    /// extension consumes whether or not a host is attached, so a queue that stays full means gone
+    @discardableResult
+    func revalidate() -> Bool {
+        lock.lock()
+        let connected = started
+        let stalled = started && consecutiveDrops >= Self.stallThreshold
+        lock.unlock()
+
+        guard connected else { return connect() }
+        guard stalled else { return true }
+
+        log.error("""
+            the virtual camera stopped draining after \(Self.stallThreshold, privacy: .public) \
+            consecutive frames, reconnecting
+            """)
+        disconnect()
+        return connect()
     }
 
     // MARK: - publishing
@@ -87,12 +116,14 @@ final class VirtualCameraSink: @unchecked Sendable {
         defer { lock.unlock() }
         guard started, let queue else { return }
 
-        // a full queue means the host is not consuming; newest-frame-wins is wrong here because
-        // the consumer is the one pacing us, so the honest response is to drop and count
+        // the consumer paces us, so a full queue is dropped and counted rather than newest-wins;
+        // the run length is what tells a slow consumer from an absent one
         guard CMSimpleQueueGetCount(queue) < CMSimpleQueueGetCapacity(queue) else {
             dropped += 1
+            consecutiveDrops += 1
             return
         }
+        consecutiveDrops = 0
 
         guard let format = format(for: pixelBuffer) else { return }
         warnOnceIfFormatDiffers(from: pixelBuffer)

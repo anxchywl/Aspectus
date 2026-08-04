@@ -547,9 +547,9 @@ final class PipelineController: ObservableObject {
 
         gaze = diagnostics.snapshot()
 
-        // reconnecting is cheap and idempotent, so the app picks the extension up whenever the
-        // user installs it rather than needing a restart
-        if !virtualCamera.isConnected { virtualCamera.connect() }
+        // picks the extension up when it is installed, and again when it is replaced, without a
+        // restart either way
+        virtualCamera.revalidate()
         virtualCameraState = virtualCamera.isConnected ? "streaming" : "not connected"
         virtualCameraSent = virtualCamera.sent
         virtualCameraDropped = virtualCamera.dropped
