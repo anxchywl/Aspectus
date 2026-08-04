@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test & Quality
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Build AspectusKit
+        run: swift build -v
+
+      - name: Build AspectusKit in release
+        run: swift build -c release
+
+      - name: Run tests
+        run: swift test
+
+      - name: Check for whitespace errors
+        run: git diff --check HEAD~1 HEAD || true
+
+  spec:
+    name: Project Spec
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Provide a signing config
+        run: cp Signing.xcconfig.example Signing.xcconfig
+
+      # project.yml is hand-maintained and the .xcodeproj is generated, so a broken spec is
+      # otherwise only discovered by whoever next runs xcodegen locally
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Verify the camera extension is wired into the app
+        run: |
+          set -euo pipefail
+          xcodebuild -project Aspectus.xcodeproj -list | grep -q AspectusCameraExtension
+          echo "camera extension target present"
+
+      - name: Check the release script parses
+        run: bash -n scripts/package-release.sh
+
+# Deliberately absent: any job that signs, notarizes or publishes.
+#
+# Those need a Developer ID private key and an app-specific password, and putting them in GitHub
+# secrets would be a permanent credential exposure on a public repository. Releases are cut locally
+# with scripts/package-release.sh, which refuses to label an unsigned or unnotarized build as
+# notarized. See docs/DESIGN.md and the script's header for the reasoning.
