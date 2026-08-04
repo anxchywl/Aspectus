@@ -20,10 +20,12 @@ CONFIG="Release"
 BUILD_DIR=".build/release-package"
 NOTARY_PROFILE="${NOTARY_PROFILE:-aspectus-notary}"
 ALLOW_UNSIGNED=0
+ALLOW_DIRTY=0
 
 for arg in "$@"; do
   case "$arg" in
     --allow-unsigned) ALLOW_UNSIGNED=1 ;;
+    --allow-dirty) ALLOW_DIRTY=1 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -54,7 +56,14 @@ fi
 VERSION=$(sed -n 's/.*MARKETING_VERSION: *"\(.*\)"/\1/p' project.yml | head -1)
 COMMIT=$(git rev-parse --short HEAD)
 DIRTY=$(git status --porcelain | wc -l | tr -d ' ')
-[ "$DIRTY" -eq 0 ] || fail "the working tree has uncommitted changes; a release must be reproducible from a commit"
+if [ "$DIRTY" -ne 0 ]; then
+  # opt-in for work that can only be debugged from a signed, installed build; the artifact is
+  # stamped -dirty so it can never be mistaken for a release
+  [ "$ALLOW_DIRTY" -eq 1 ] || fail "the working tree has uncommitted changes; a release must be reproducible from a commit.
+To build a throwaway diagnostic artifact from a dirty tree instead, re-run with --allow-dirty."
+  COMMIT="$COMMIT-dirty"
+  say "DIRTY TREE — this artifact is for diagnosis only and is not a release"
+fi
 
 say "Aspectus $VERSION ($COMMIT), team ${TEAM_ID:-none}"
 
