@@ -31,6 +31,10 @@ struct DiagnosticsHUD: View {
                 row("face", "none", warn: true)
             }
             gazeRows
+            row("vcam", controller.virtualCameraState,
+                warn: controller.virtualCameraState != "streaming")
+            row("vcam frames", "\(controller.virtualCameraSent) sent / \(controller.virtualCameraDropped) dropped",
+                warn: controller.virtualCameraDropped > 0)
             row("dropped", "\(controller.droppedFrames)")
             row("in-flight", "\(controller.inFlight)")
             row("memory", String(format: "%.0f MB", controller.memoryMB))

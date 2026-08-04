@@ -20,6 +20,7 @@ targets:
     platform: macOS
     sources:
       - path: App
+      - path: Shared
     dependencies:
       - package: AspectusKit
         product: AspectusKit
@@ -31,7 +32,7 @@ targets:
       properties:
         CFBundleDisplayName: Aspectus
         CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "3"
+        CFBundleVersion: "6"
         LSMinimumSystemVersion: "14.0"
         NSCameraUsageDescription: "Aspectus needs the camera to capture and correct your gaze."
         # required for any app that installs a system extension; the cmio category rejects the
@@ -52,7 +53,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aspectus.app
         MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "3"
+        CURRENT_PROJECT_VERSION: "6"
         GENERATE_INFOPLIST_FILE: false
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: $(ASPECTUS_CODE_SIGN_IDENTITY)
@@ -69,12 +70,13 @@ targets:
     platform: macOS
     sources:
       - path: CameraExtension
+      - path: Shared
     info:
       path: CameraExtension/Info.plist
       properties:
         CFBundleDisplayName: Aspectus Camera
         CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "3"
+        CFBundleVersion: "6"
         CFBundlePackageType: SYSX
         NSSystemExtensionUsageDescription: "Aspectus installs a camera extension so other apps can use the gaze-corrected video as a normal camera."
         # the mach service must be prefixed with the app group or the sandbox refuses to vend it
@@ -93,7 +95,7 @@ targets:
         # the bundle is named after its identifier, matching how the system stores it once installed
         PRODUCT_NAME: com.aspectus.app.cameraextension
         MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "3"
+        CURRENT_PROJECT_VERSION: "6"
         GENERATE_INFOPLIST_FILE: false
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: $(ASPECTUS_CODE_SIGN_IDENTITY)

@@ -37,6 +37,11 @@ final class PipelineController: ObservableObject {
     /// magnitude, and the distributions answer whether a gate ever actually fires
     @Published var gaze: DiagnosticsCollector.Snapshot = .empty
 
+    /// what the virtual camera is doing, so a black picture in Zoom is diagnosable from the HUD
+    @Published private(set) var virtualCameraState = "not connected"
+    @Published private(set) var virtualCameraSent = 0
+    @Published private(set) var virtualCameraDropped = 0
+
     /// the active calibration, nil when the install has never been calibrated or was reset
     @Published private(set) var calibration: GazeCalibration?
     /// non-nil only while a calibration flow is running
@@ -131,6 +136,8 @@ final class PipelineController: ObservableObject {
     private let pipelineMetrics = StageMetrics(name: "pipeline", window: 240)
     private let e2e = StageMetrics(name: "end-to-end", window: 240)
     private let diagnostics = DiagnosticsCollector()
+    /// an output, never a dependency: if it is absent or fails the preview carries on untouched
+    private let virtualCamera = VirtualCameraSink()
     private weak var renderer: MetalRenderer?
 
     // fps meters updated on each event, snapshotted by the stats timer
@@ -282,6 +289,7 @@ final class PipelineController: ObservableObject {
     }
 
     func stop() {
+        virtualCamera.disconnect()
         capture.stop()
         consumerTask?.cancel(); consumerTask = nil
         statsTimer?.invalidate(); statsTimer = nil
@@ -321,6 +329,7 @@ final class PipelineController: ObservableObject {
         let diagnostics = self.diagnostics
         let activeCalibration = self.activeCalibration
         let sessionStore = self.sessionStore
+        let virtualCamera = self.virtualCamera
 
         consumerTask = Task.detached(priority: .userInitiated) { [weak self] in
             // landmarks from the previous frame, which is what the current frame is corrected with
@@ -437,6 +446,9 @@ final class PipelineController: ObservableObject {
                     irisTravelPixels: travelPixels,
                     fallback: fallback))
 
+                // before mirroring, which is a display choice and must not reach a host
+                virtualCamera.publish(corrected.pixelBuffer, timing: frame.header.timing)
+
                 let overlay = applied
                 await MainActor.run { [weak self] in
                     guard let self else { return }
@@ -535,6 +547,13 @@ final class PipelineController: ObservableObject {
 
         gaze = diagnostics.snapshot()
 
+        // reconnecting is cheap and idempotent, so the app picks the extension up whenever the
+        // user installs it rather than needing a restart
+        if !virtualCamera.isConnected { virtualCamera.connect() }
+        virtualCameraState = virtualCamera.isConnected ? "streaming" : "not connected"
+        virtualCameraSent = virtualCamera.sent
+        virtualCameraDropped = virtualCamera.dropped
+
         processFPS = processFPSValue
         outputFPS = outputFPSValue
         droppedFrames = capture.output.dropped
@@ -555,7 +574,9 @@ final class PipelineController: ObservableObject {
         benchmark?.record(.init(captureFPS: captureFPS, processFPS: processFPS, outputFPS: outputFPS,
                                 tracking: t, correction: c, pipeline: pl, processing: p, endToEnd: e,
                                 dropped: droppedFrames, depth: inFlight,
-                                memoryMB: memoryMB, thermal: thermalState, gaze: gaze))
+                                memoryMB: memoryMB, thermal: thermalState, gaze: gaze,
+                                vcamState: virtualCameraState, vcamSent: virtualCameraSent,
+                                vcamDropped: virtualCameraDropped))
     }
 
     // MARK: - system telemetry

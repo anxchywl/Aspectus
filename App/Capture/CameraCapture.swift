@@ -2,6 +2,7 @@
 @preconcurrency import AVFoundation
 import CoreVideo
 import AspectusKit
+import os
 
 /// owns the AVCaptureSession and delivers frames into a drop-stale box
 /// alwaysDiscardsLateVideoFrames plus the single-slot box keep at most one frame in flight
@@ -15,6 +16,8 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     private(set) var isRunning = false
     private(set) var activeFormatDescription: String = "—"
+
+    private let log = Logger(subsystem: "com.aspectus.app", category: "capture")
 
     enum CaptureError: Error { case noDevice, cannotAddInput, cannotAddOutput }
 
@@ -64,8 +67,12 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         // 60 fps may be unreachable on a given Mac, it is a hardware/format cap
         Self.selectFormat(for: device, target: Self.targetFormat)
 
+        // width and height here are what holds the delivered size; measured on macOS 26.6 a
+        // matching session preset applies cleanly and changes neither activeFormat nor the output
         videoOutput.videoSettings = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: Int(Self.targetFormat.width),
+            kCVPixelBufferHeightKey as String: Int(Self.targetFormat.height),
         ]
         videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.setSampleBufferDelegate(self, queue: sampleQueue)
@@ -77,11 +84,16 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
         session.commitConfiguration()
 
-        // macOS does not expose inputPriority and the header leaves preset-vs-activeFormat
-        // precedence unspecified here, so the pin is read back rather than assumed
+        // after the commit, which resets the device's frame durations
+        Self.pinFrameRate(for: device, target: Self.targetFormat)
+
+        // the sensor may legitimately run larger than the delivered size, so both are shown
         let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
         let fps = 1.0 / CMTimeGetSeconds(device.activeVideoMinFrameDuration)
-        activeFormatDescription = "\(device.localizedName) \(dims.width)×\(dims.height)@\(Int(fps.rounded())) BGRA"
+        let sensor = dims.width == Self.targetFormat.width && dims.height == Self.targetFormat.height
+            ? "" : " (sensor \(dims.width)×\(dims.height))"
+        activeFormatDescription = "\(device.localizedName) \(Self.targetFormat.width)×"
+            + "\(Self.targetFormat.height)@\(Int(fps.rounded())) BGRA\(sensor)"
     }
 
     /// the benchmark operating point, fixed so latency numbers are comparable across runs
@@ -91,7 +103,26 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         let fps: Double
     }
 
-    static let targetFormat = TargetFormat(width: 1280, height: 720, fps: 60)
+    /// resolution follows the virtual camera's advertised format; the rate is our own and is
+    /// clamped by hardware
+    static let targetFormat = TargetFormat(width: VirtualCameraFormat.width,
+                                           height: VirtualCameraFormat.height,
+                                           fps: 60)
+
+    /// re-pinned after `commitConfiguration`, which resets the device's frame durations
+    private static func pinFrameRate(for device: AVCaptureDevice, target: TargetFormat) {
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            let cap = device.activeFormat.videoSupportedFrameRateRanges
+                .map(\.maxFrameRate).max() ?? target.fps
+            let duration = CMTime(value: 1, timescale: CMTimeScale(min(target.fps, cap).rounded()))
+            device.activeVideoMinFrameDuration = duration
+            device.activeVideoMaxFrameDuration = duration
+        } catch {
+            // non-fatal, the camera keeps whatever rate it defaulted to
+        }
+    }
 
     /// pins the format nearest the target, preferring an exact match then the smallest format that
     /// still reaches the target rate, so the latency budget is not spent on unnecessary pixels

@@ -1,40 +1,12 @@
 import Foundation
 import CoreMediaIO
 import CoreMedia
+import CoreVideo
 import os
 
-/// the unified log shows nothing for this process, so state goes to a file in the shared app group
-/// container where anyone debugging can read it
-///
-/// every call is handed to a background queue and returns immediately. resolving a group container
-/// does IPC to containermanagerd, and doing that inline inside a stream callback hangs the callback
-/// outright — measured: it stopped the sink consuming entirely while leaving the process alive and
-/// crash-free, which looked exactly like a logic bug
-enum ExtensionTrace {
-    private static let queue = DispatchQueue(label: "com.aspectus.cameraextension.trace", qos: .utility)
-    // both are touched only from `queue`, which is the isolation the compiler cannot see
-    private nonisolated(unsafe) static var handle: FileHandle?
-    private nonisolated(unsafe) static var resolved = false
-
-    static func write(_ message: String) {
-        let line = "\(Date().timeIntervalSince1970) \(message)\n"
-        queue.async {
-            if !resolved {
-                resolved = true
-                if let dir = FileManager.default
-                    .containerURL(forSecurityApplicationGroupIdentifier: "group.com.aspectus") {
-                    let url = dir.appendingPathComponent("extension.log")
-                    if !FileManager.default.fileExists(atPath: url.path) {
-                        FileManager.default.createFile(atPath: url.path, contents: nil)
-                    }
-                    handle = try? FileHandle(forWritingTo: url)
-                    handle?.seekToEndOfFile()
-                }
-            }
-            handle?.write(Data(line.utf8))
-        }
-    }
-}
+// lifecycle traces are `.error` for retention, not severity: only error and above persist without
+// a live `log stream`. read them with
+// `log show --predicate 'subsystem == "com.aspectus.app.cameraextension"' --info --debug`
 
 final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource {
     private(set) var device: CMIOExtensionDevice!
@@ -45,10 +17,10 @@ final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource {
 
     private let log = Logger(subsystem: "com.aspectus.app.cameraextension", category: "device")
 
-    /// matches what the app's correction path produces, so no format conversion happens in transit
-    static let width: Int32 = 1280
-    static let height: Int32 = 720
-    static let frameRate: Int32 = 30
+    /// shared with the app so the advertised format and the published one cannot drift
+    static let width = VirtualCameraFormat.width
+    static let height = VirtualCameraFormat.height
+    static let frameRate = VirtualCameraFormat.frameRate
 
     init(localizedName: String, deviceID: UUID) {
         super.init()
@@ -123,6 +95,9 @@ final class SourceStreamSource: NSObject, CMIOExtensionStreamSource {
     private let streaming = OSAllocatedUnfairLock(initialState: false)
     var isStreaming: Bool { streaming.withLock { $0 } }
 
+    private let log = Logger(subsystem: "com.aspectus.app.cameraextension", category: "source")
+    private nonisolated(unsafe) var sends: UInt64 = 0
+
     init(formats: [CMIOExtensionStreamFormat]) {
         self.formats = formats
         super.init()
@@ -145,18 +120,28 @@ final class SourceStreamSource: NSObject, CMIOExtensionStreamSource {
     func authorizedToStartStream(for client: CMIOExtensionClient) -> Bool { true }
 
     func startStream() throws {
-        ExtensionTrace.write("source startStream - a host attached")
+        log.error("source startStream - a host attached")
         streaming.withLock { $0 = true }
     }
 
     func stopStream() throws {
-        ExtensionTrace.write("source stopStream")
+        log.error("source stopStream")
         streaming.withLock { $0 = false }
     }
 
     /// forwards one finished frame to whichever host is attached
     func send(_ sampleBuffer: CMSampleBuffer, hostTimeInNanoseconds: UInt64) {
-        guard isStreaming, let stream else { return }
+        guard isStreaming else { return }
+        // separated from the `isStreaming` gate: a nil weak stream is otherwise indistinguishable
+        // from a working forward
+        guard let stream else {
+            log.error("forward dropped: the source stream reference is nil")
+            return
+        }
+        sends &+= 1
+        if sends % 300 == 1 {
+            log.debug("forwarded \(self.sends, privacy: .public) buffers into the host stream")
+        }
         stream.send(sampleBuffer, discontinuity: [], hostTimeInNanoseconds: hostTimeInNanoseconds)
     }
 }
@@ -198,7 +183,7 @@ final class SinkStreamSource: NSObject, CMIOExtensionStreamSource {
     func setStreamProperties(_ streamProperties: CMIOExtensionStreamProperties) throws {}
 
     func authorizedToStartStream(for client: CMIOExtensionClient) -> Bool {
-        ExtensionTrace.write("sink authorized for a client")
+        log.error("sink authorized for a client")
         clientLock.lock()
         self.client = client
         clientLock.unlock()
@@ -206,13 +191,13 @@ final class SinkStreamSource: NSObject, CMIOExtensionStreamSource {
     }
 
     func startStream() throws {
-        ExtensionTrace.write("sink startStream")
+        log.error("sink startStream")
         consuming.withLock { $0 = true }
         consumeNext()
     }
 
     func stopStream() throws {
-        ExtensionTrace.write("sink stopStream")
+        log.error("sink stopStream")
         consuming.withLock { $0 = false }
         clientLock.lock()
         client = nil
@@ -240,8 +225,12 @@ final class SinkStreamSource: NSObject, CMIOExtensionStreamSource {
                 let hostTime = UInt64(CMTimeGetSeconds(
                     CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000_000)
                 self.consumed &+= 1
-                if self.consumed % 60 == 1 {
-                    ExtensionTrace.write("consumed \(self.consumed) forwarding=\(self.output?.isStreaming == true)")
+                if self.consumed % 300 == 1 {
+                    self.log.debug("""
+                        consumed \(self.consumed, privacy: .public) \
+                        forwarding=\(self.output?.isStreaming == true, privacy: .public) \
+                        hostTime=\(hostTime, privacy: .public)
+                        """)
                 }
                 self.output?.send(sampleBuffer, hostTimeInNanoseconds: hostTime)
                 // the app is owed an acknowledgement or its queue never drains
