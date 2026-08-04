@@ -8,5 +8,11 @@ DerivedData/
 Aspectus.xcodeproj/
 .swiftpm/
 
+# release artifacts
+dist/
+
+# local signing configuration — copy from Signing.xcconfig.example
+Signing.xcconfig
+
 # macOS
 .DS_Store

@@ -1,0 +1,14 @@
+// Local signing configuration. Copy to Signing.xcconfig and fill in your own team.
+//
+//     cp Signing.xcconfig.example Signing.xcconfig
+//
+// Signing.xcconfig is gitignored, so no team identifier is committed. The app builds and runs
+// without a team; only the camera extension needs one, because system-extension and app-group
+// entitlements are restricted and cannot be carried by an ad-hoc signature.
+//
+// For a local build use "Apple Development". For a release that will be notarized and published,
+// use "Developer ID Application" — a Developer Program membership is required for that identity,
+// and only the Account Holder can create the certificate.
+
+ASPECTUS_TEAM_ID =
+ASPECTUS_CODE_SIGN_IDENTITY = -
