@@ -1,8 +1,9 @@
 # Aspectus for macOS — Design (Phase 1)
 
 Reference machine: Apple M3, macOS 26.6 (25G72), Xcode 26.6 (17F113), Swift 6.3.3 (measured).
-Status: phases 1–4 implemented; 42 unit tests green in a release build. The virtual camera
-(phase 5) is not started. See "Measured facts" below for what has actually been run on hardware.
+Status: phases 1–5 implemented; 156 unit tests green in a release build. The virtual camera
+delivers frames to a capture client but has not been tried in any conferencing app. See
+"Measured facts" below for what has actually been run on hardware.
 
 ## 1. Candidate comparison
 
@@ -85,6 +86,11 @@ construction, newest-frame-wins, drops counted. Zero-copy path: `CVPixelBuffer`�
 5. **CoreMediaIO Camera Extension lifecycle / signing / host-app quirks.** Mitigation: build
    the extension early against SimpleDALPlugin/`cameraextension` references; test the full host
    matrix (Zoom/Meet/Teams/Discord/Slack/OBS); handle camera + host disconnect/reacquire.
+   **Partly retired.** Signing, notarization and activation work, and the extension being replaced
+   under a running app is handled: the app rebuilds a connection whose queue has stopped draining,
+   rather than believing forever that it is still connected. The host matrix remains untested, so
+   host-app quirks are still an open risk — and the one host quirk found so far was in the test
+   client, not in any host.
 
 ## 6. Implementation phases
 Matches the brief: (1) Video foundation, (2) Tracking, (3) Correction prototype [**hard gate**:
@@ -115,7 +121,7 @@ from a 136 s run with the preview window continuously visible (3,937 presented f
 - Frames in flight never exceeded 1; 11 drops in 3,937 frames; thermal state nominal throughout.
 - Resident memory over a separate 801 s run trended **down** (150 → 115 MB), so no leak is visible
   at that timescale. The full 30-minute soak is still outstanding.
-- 42 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
+- 156 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
   and reopen, 1€ jitter reduction and bounded-lag tracking, gate hysteresis / angle-limit fallback
   / slew ramp, blink preservation, filter reset on tracking loss and timestamp discontinuity,
   recovery within the 300 ms budget, gaze geometry and warp containment, metrics percentiles.
@@ -141,6 +147,25 @@ camera's native YUV instead of converting to BGRA per frame.
 The geometric warp resamples the iris and is stable once filtered, but it cannot model eyelid
 interaction or iris occlusion, so it degrades visibly at larger redirect angles. It is a working,
 licence-clean baseline behind the `EyeCorrector` seam, not the final quality target.
+
+### Phase 5: the virtual camera delivers
+
+Signing, notarization, activation and enumeration all work: the extension installs from a
+Developer ID build and macOS vends a camera that AVFoundation lists beside the physical ones. A
+live capture client received **309 frames over 10 s** (≈31 FPS), matching the rate the extension
+reported forwarding.
+
+Three bugs on the way there, each real and each measured rather than reasoned about: the two
+streams were wired in the wrong direction; the consume loop terminated permanently if the client
+arrived after the stream started; and a trace call that resolved an app-group container inline on
+a stream callback blocked it, stopping consumption entirely while leaving the process alive and
+crash-free — which presented exactly like a logic bug.
+
+The costliest error was not in the code. A host probe was trusted for several rounds without ever
+being validated against a known-good control; it was an unsigned binary with no camera permission
+and could not have received a frame from any camera. It reported zero frames from a transport that
+was in fact working, and every conclusion drawn from it was wrong. The control — pointing the same
+probe at the built-in camera — would have exposed it in one run.
 
 ## Known gaps
 
@@ -208,3 +233,11 @@ licence-clean baseline behind the `EyeCorrector` seam, not the final quality tar
   has to remove.
 - No handling yet for camera disconnect, session runtime errors, or sleep/wake.
 - Restart after stop is fixed and unit-tested, but not yet verified end-to-end on hardware.
+- The virtual camera advertises 30 FPS while capture targets 60. Moot on the reference machine,
+  whose camera caps at 30, but on a camera that reaches 60 the app would publish faster than the
+  format it advertises. Resolution cannot drift the same way: it is one constant compiled into
+  both targets, pinned in the capture output, and checked against real buffers before publishing.
+- The virtual camera has never been soak-tested. One session recorded resident memory at 433 MB
+  against a ~110 MB baseline, after the stats recorder had already stopped writing for reasons
+  that were never established. Neither observation is diagnosed, and neither should be quoted as
+  a result until a clean sustained run exists.
