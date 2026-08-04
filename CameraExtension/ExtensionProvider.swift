@@ -4,37 +4,38 @@ import CoreMedia
 import os
 
 /// the unified log shows nothing for this process, so state goes to a file in the shared app group
-/// container where both the extension and anyone debugging can read it
+/// container where anyone debugging can read it
+///
+/// every call is handed to a background queue and returns immediately. resolving a group container
+/// does IPC to containermanagerd, and doing that inline inside a stream callback hangs the callback
+/// outright — measured: it stopped the sink consuming entirely while leaving the process alive and
+/// crash-free, which looked exactly like a logic bug
 enum ExtensionTrace {
-    private static let lock = NSLock()
-    private static let url: URL? = FileManager.default
-        .containerURL(forSecurityApplicationGroupIdentifier: "group.com.aspectus")?
-        .appendingPathComponent("extension.log")
+    private static let queue = DispatchQueue(label: "com.aspectus.cameraextension.trace", qos: .utility)
+    // both are touched only from `queue`, which is the isolation the compiler cannot see
+    private nonisolated(unsafe) static var handle: FileHandle?
+    private nonisolated(unsafe) static var resolved = false
 
     static func write(_ message: String) {
-        guard let url else { return }
-        lock.lock(); defer { lock.unlock() }
         let line = "\(Date().timeIntervalSince1970) \(message)\n"
-        if let handle = try? FileHandle(forWritingTo: url) {
-            handle.seekToEndOfFile()
-            handle.write(Data(line.utf8))
-            try? handle.close()
-        } else {
-            try? line.write(to: url, atomically: true, encoding: .utf8)
+        queue.async {
+            if !resolved {
+                resolved = true
+                if let dir = FileManager.default
+                    .containerURL(forSecurityApplicationGroupIdentifier: "group.com.aspectus") {
+                    let url = dir.appendingPathComponent("extension.log")
+                    if !FileManager.default.fileExists(atPath: url.path) {
+                        FileManager.default.createFile(atPath: url.path, contents: nil)
+                    }
+                    handle = try? FileHandle(forWritingTo: url)
+                    handle?.seekToEndOfFile()
+                }
+            }
+            handle?.write(Data(line.utf8))
         }
     }
 }
 
-/// the virtual camera the host applications see
-///
-/// deliberately thin: it owns no capture, no tracking and no correction. the app does all of that
-/// and pushes finished frames into the sink stream; this process only forwards them to the source
-/// stream that Zoom, Meet, OBS and friends read from. keeping the pipeline in the app means the
-/// extension cannot fall behind it, and calibration keeps a UI to live in
-///
-/// the two streams are the whole design:
-///   app  → sink stream   (CMIOStreamCopyBufferQueue, fixed capacity, drops when full)
-///   sink → source stream (sendSampleBuffer)
 final class ExtensionDeviceSource: NSObject, CMIOExtensionDeviceSource {
     private(set) var device: CMIOExtensionDevice!
     private var sourceStream: CMIOExtensionStream!
