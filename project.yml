@@ -9,6 +9,11 @@ packages:
   AspectusKit:
     path: .
 
+# team identifier comes from an untracked file so no signing identity is committed
+configFiles:
+  Debug: Signing.xcconfig
+  Release: Signing.xcconfig
+
 targets:
   Aspectus:
     type: application
@@ -18,14 +23,20 @@ targets:
     dependencies:
       - package: AspectusKit
         product: AspectusKit
+      - target: AspectusCameraExtension
+        embed: true
+        codeSign: true
     info:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: Aspectus
         CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "1"
+        CFBundleVersion: "2"
         LSMinimumSystemVersion: "14.0"
         NSCameraUsageDescription: "Aspectus needs the camera to capture and correct your gaze."
+        # required for any app that installs a system extension; the cmio category rejects the
+        # install outright without it
+        NSSystemExtensionUsageDescription: "Aspectus installs a camera extension so other apps can use the gaze-corrected video as a normal camera."
         NSHighResolutionCapable: true
         NSPrincipalClass: NSApplication
     entitlements:
@@ -33,16 +44,61 @@ targets:
       properties:
         com.apple.security.app-sandbox: false
         com.apple.security.device.camera: true
+        # required to install the camera extension; restricted, so it needs a real team
+        com.apple.developer.system-extension.install: true
+        com.apple.security.application-groups:
+          - group.com.aspectus
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aspectus.app
         MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "2"
         GENERATE_INFOPLIST_FILE: false
         CODE_SIGN_STYLE: Automatic
-        CODE_SIGN_IDENTITY: "-"
-        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: $(ASPECTUS_CODE_SIGN_IDENTITY)
+        DEVELOPMENT_TEAM: $(ASPECTUS_TEAM_ID)
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         ENABLE_HARDENED_RUNTIME: true
         MTL_ENABLE_DEBUG_INFO: INCLUDE_SOURCE
+        # the extension lands here, which is where the system looks for it
+        SYSTEM_EXTENSION_INSTALL_PATH: $(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/SystemExtensions
+
+  AspectusCameraExtension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: CameraExtension
+    info:
+      path: CameraExtension/Info.plist
+      properties:
+        CFBundleDisplayName: Aspectus Camera
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "2"
+        CFBundlePackageType: SYSX
+        NSSystemExtensionUsageDescription: "Aspectus installs a camera extension so other apps can use the gaze-corrected video as a normal camera."
+        # the mach service must be prefixed with the app group or the sandbox refuses to vend it
+        CMIOExtension:
+          CMIOExtensionMachServiceName: group.com.aspectus.service
+    entitlements:
+      path: CameraExtension/AspectusCameraExtension.entitlements
+      properties:
+        # a camera extension is always sandboxed, and reaches the app through the shared group
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - group.com.aspectus
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aspectus.app.cameraextension
+        # the bundle is named after its identifier, matching how the system stores it once installed
+        PRODUCT_NAME: com.aspectus.app.cameraextension
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "2"
+        GENERATE_INFOPLIST_FILE: false
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: $(ASPECTUS_CODE_SIGN_IDENTITY)
+        DEVELOPMENT_TEAM: $(ASPECTUS_TEAM_ID)
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        ENABLE_HARDENED_RUNTIME: true
+        SKIP_INSTALL: true

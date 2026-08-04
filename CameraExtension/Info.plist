@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Aspectus</string>
+	<string>Aspectus Camera</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -15,19 +15,16 @@
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
-	<string>APPL</string>
+	<string>SYSX</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.1.0</string>
 	<key>CFBundleVersion</key>
 	<string>2</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>14.0</string>
-	<key>NSCameraUsageDescription</key>
-	<string>Aspectus needs the camera to capture and correct your gaze.</string>
-	<key>NSHighResolutionCapable</key>
-	<true/>
-	<key>NSPrincipalClass</key>
-	<string>NSApplication</string>
+	<key>CMIOExtension</key>
+	<dict>
+		<key>CMIOExtensionMachServiceName</key>
+		<string>group.com.aspectus.service</string>
+	</dict>
 	<key>NSSystemExtensionUsageDescription</key>
 	<string>Aspectus installs a camera extension so other apps can use the gaze-corrected video as a normal camera.</string>
 </dict>

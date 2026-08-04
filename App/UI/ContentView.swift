@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var controller = PipelineController()
+    @StateObject private var virtualCamera = SystemExtensionInstaller()
     @State private var showCalibration = false
 
     var body: some View {
@@ -17,7 +18,11 @@ struct ContentView: View {
             DiagnosticsHUD(controller: controller)
                 .padding(12)
 
-            if controller.permissionDenied {
+            if case let .failed(message) = virtualCamera.state {
+                overlayMessage("Virtual camera could not install.\n\(message)")
+            } else if virtualCamera.state == .needsApproval {
+                overlayMessage(virtualCamera.state.summary)
+            } else if controller.permissionDenied {
                 overlayMessage("Camera access denied.\nEnable it in System Settings ▸ Privacy & Security ▸ Camera.")
             } else if !controller.isRunning {
                 overlayMessage("Starting camera…")
@@ -62,6 +67,13 @@ struct ContentView: View {
                       ? "Measure how your eyes read relative to the camera"
                       : "Recalibrate or reset the stored calibration")
                 .disabled(!controller.isRunning)
+            }
+            ToolbarItem(placement: .automatic) {
+                Button(virtualCamera.state == .activated ? "Camera installed" : "Install camera") {
+                    virtualCamera.activate()
+                }
+                .help(virtualCamera.state.summary)
+                .disabled(virtualCamera.state == .requesting)
             }
             ToolbarItem(placement: .automatic) {
                 Button(controller.isRunning ? "Stop" : "Start") {
