@@ -173,6 +173,7 @@ Aspectus $VERSION
 commit:        $COMMIT
 architecture:  arm64 (Apple Silicon only)
 extension:     embedded
+licence:       Apache-2.0, bundled at Contents/Resources/LICENSE
 signing:       $([ -n "$IDENTITY" ] && echo "Developer ID Application, team $TEAM_ID" || echo "UNSIGNED")
 notarization:  $([ "$STAPLED" -eq 1 ] && echo "notarized and stapled" || echo "NOT notarized")
 sha256:        $(shasum -a 256 "$ZIP" | cut -d' ' -f1)

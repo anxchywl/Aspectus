@@ -8,8 +8,9 @@ Built with Swift, SwiftUI, Swift Concurrency, AVFoundation, Metal, Core ML, and 
 > corrected frames — Aspectus appears alongside your real cameras and has been measured feeding a
 > live AVFoundation capture client at 30 FPS. It has **not** yet been tried in Zoom, Meet, Teams,
 > Discord, Slack or OBS, so treat those as unverified rather than working. There are still no
-> downloadable releases: the project has no licence yet. Building it yourself needs an Apple
-> Developer ID, because macOS will not activate an unsigned camera extension. See
+> downloadable releases — the code is Apache-2.0 licensed, but no build has been cut. Building it
+> yourself needs an Apple Developer ID, because macOS will not activate an unsigned camera
+> extension. See
 > [Status](#status) for what works and [Performance](#performance) for measured numbers.
 
 ---
@@ -138,6 +139,7 @@ aspectus/
   Shared/                  the format contract, compiled into both the app and the extension
   scripts/                 signing, notarization and packaging
   docs/DESIGN.md           research, foundation choice, pipeline design, risks, test criteria
+  LICENSE, NOTICE          Apache-2.0, and the attribution that travels with every build
 ```
 
 Pipeline architecture and agent coding rules: [AGENTS.md](./AGENTS.md)
@@ -156,7 +158,7 @@ Research and technical design: [docs/DESIGN.md](./docs/DESIGN.md)
 | 3b — Learned warp field | Core ML flow-field model | ⬜ blocked — no licence-clean weights ([why](./docs/DESIGN.md#3-rejected-alternatives)) |
 | 4 — Temporal quality | 1€ filters, gate hysteresis and slew wired into the live pipeline | ✅ wired + tested |
 | 5 — Virtual camera | CoreMediaIO Camera Extension | ✅ installs and delivers frames; untested in conferencing apps |
-| 6 — UI & hardening | Full SwiftUI, diagnostics, settings, release packaging | ⬜ HUD, basic controls, signing/notarization/CI, camera disconnect and sleep/wake recovery; no settings UI, no licence |
+| 6 — UI & hardening | Full SwiftUI, diagnostics, settings, release packaging | ⬜ HUD, basic controls, signing/notarization/CI, camera disconnect and sleep/wake recovery, licence; no settings UI |
 
 Known gaps are listed at the end of [docs/DESIGN.md](./docs/DESIGN.md).
 
@@ -222,3 +224,24 @@ xcodebuild -project Aspectus.xcodeproj -scheme Aspectus -configuration Release \
 ```
 
 Benchmarks are taken from release builds only. Anything not yet measured on hardware is labeled as such in [docs/DESIGN.md](./docs/DESIGN.md).
+
+---
+
+## Licence
+
+Apache License 2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE). Copyright 2026 anxchywl.
+
+Apache-2.0 rather than MIT for the patent grant: gaze correction is a patent-dense field, and an
+explicit grant is worth more here than the two paragraphs it costs.
+
+### Attribution
+
+The gaze-correction stage is a native reimplementation of the warp-field method from
+[chihfanhsu/gaze_correction](https://github.com/chihfanhsu/gaze_correction) ("Look at me!", ACM TOMM
+2019), Copyright 2019 Chih-Fan Hsu, licensed under BSD-3-Clause. **No source code and no trained
+weights from that project are used here** — the weights ship without a licence grant and were
+trained on a non-commercial dataset, which is why they were rejected. The reasoning is in
+[docs/DESIGN.md §2–3](./docs/DESIGN.md).
+
+Tracking uses Apple Vision; nothing in this repository is derived from a model whose provenance is
+unaccounted for.

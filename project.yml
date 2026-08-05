@@ -21,6 +21,12 @@ targets:
     sources:
       - path: App
       - path: Shared
+      # apache-2.0 §4(a): a copy travels with every redistributed build, and being a bundle
+      # resource means it is sealed by the signature rather than added after signing
+      - path: LICENSE
+        buildPhase: resources
+      - path: NOTICE
+        buildPhase: resources
     dependencies:
       - package: AspectusKit
         product: AspectusKit
