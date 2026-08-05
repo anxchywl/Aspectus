@@ -45,6 +45,7 @@ final class PipelineController: ObservableObject {
     @Published private(set) var virtualCameraState = "not connected"
     @Published private(set) var virtualCameraSent = 0
     @Published private(set) var virtualCameraDropped = 0
+    @Published private(set) var virtualCameraPaced = 0
 
     /// the active calibration, nil when the install has never been calibrated or was reset
     @Published private(set) var calibration: GazeCalibration?
@@ -690,6 +691,7 @@ final class PipelineController: ObservableObject {
         virtualCameraState = virtualCamera.isConnected ? "streaming" : "not connected"
         virtualCameraSent = virtualCamera.sent
         virtualCameraDropped = virtualCamera.dropped
+        virtualCameraPaced = virtualCamera.paced
 
         droppedFrames = capture.output.dropped
         inFlight = capture.output.depth
@@ -717,7 +719,7 @@ final class PipelineController: ObservableObject {
                                 dropped: droppedFrames, depth: inFlight,
                                 memoryMB: memoryMB, thermal: thermalState, gaze: gaze,
                                 vcamState: virtualCameraState, vcamSent: virtualCameraSent,
-                                vcamDropped: virtualCameraDropped))
+                                vcamDropped: virtualCameraDropped, vcamPaced: virtualCameraPaced))
     }
 
     // MARK: - system telemetry

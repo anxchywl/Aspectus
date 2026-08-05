@@ -25,6 +25,13 @@ final class VirtualCameraSink: @unchecked Sendable {
 
     private(set) var dropped = 0
     private(set) var sent = 0
+    /// frames withheld to hold the advertised rate, counted apart from `dropped` because they are
+    /// the pacer working rather than the far side failing
+    private(set) var paced = 0
+
+    /// capture may run faster than the format the extension declared; hosts are told one cadence
+    /// and must not be given another
+    private var pacer = PublishPacer(frameRate: Double(VirtualCameraFormat.frameRate))
 
     private let log = Logger(subsystem: "com.aspectus.app", category: "sink")
 
@@ -116,6 +123,13 @@ final class VirtualCameraSink: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard started, let queue else { return }
+
+        // paced before the queue is consulted: withholding a frame we were never entitled to send
+        // is not the far side falling behind and must not read as one
+        guard pacer.shouldPublish(at: timing.captureHostTime) else {
+            paced += 1
+            return
+        }
 
         // the consumer paces us, so a full queue is dropped and counted rather than newest-wins;
         // the run length is what tells a slow consumer from an absent one

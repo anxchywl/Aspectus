@@ -37,6 +37,8 @@ struct DiagnosticsHUD: View {
                 warn: controller.virtualCameraState != "streaming")
             row("vcam frames", "\(controller.virtualCameraSent) sent / \(controller.virtualCameraDropped) dropped",
                 warn: controller.virtualCameraDropped > 0)
+            // paced is the advertised-rate cap doing its job, so it is never a warning
+            row("vcam paced", "\(controller.virtualCameraPaced)")
             row("dropped", "\(controller.droppedFrames)")
             row("in-flight", "\(controller.inFlight)")
             row("memory", String(format: "%.0f MB", controller.memoryMB))

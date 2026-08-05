@@ -21,6 +21,7 @@ final class BenchmarkRecorder {
         let vcamState: String
         let vcamSent: Int
         let vcamDropped: Int
+        let vcamPaced: Int
     }
 
     private let url: URL
@@ -43,7 +44,7 @@ final class BenchmarkRecorder {
         face_conf_min,face_conf_mean,face_conf_max,\
         gaze_conf_min,gaze_conf_mean,gaze_conf_max,\
         fallback,dominant_fallback,corrected_frames,gaze_frames,\
-        vcam_state,vcam_sent,vcam_dropped
+        vcam_state,vcam_sent,vcam_dropped,vcam_paced
 
         """
 
@@ -74,7 +75,7 @@ final class BenchmarkRecorder {
             "\(s.endToEnd.processed)", "\(s.dropped)", "\(s.depth)",
             fmt(s.memoryMB), s.thermal,
         ].joined(separator: ",") + "," + gazeColumns(s.gaze)
-            + ",\(s.vcamState),\(s.vcamSent),\(s.vcamDropped)"
+            + ",\(s.vcamState),\(s.vcamSent),\(s.vcamDropped),\(s.vcamPaced)"
         handle?.write(Data((row + "\n").utf8))
     }
 
