@@ -43,6 +43,8 @@ final class PipelineController: ObservableObject {
 
     /// what the virtual camera is doing, so a black picture in Zoom is diagnosable from the HUD
     @Published private(set) var virtualCameraState = "not connected"
+    /// the same fact as the state string, for anything that has to branch on it rather than show it
+    @Published private(set) var virtualCameraConnected = false
     @Published private(set) var virtualCameraSent = 0
     @Published private(set) var virtualCameraDropped = 0
     @Published private(set) var virtualCameraPaced = 0
@@ -754,7 +756,8 @@ final class PipelineController: ObservableObject {
         // picks the extension up when it is installed, and again when it is replaced, without a
         // restart either way
         virtualCamera.revalidate()
-        virtualCameraState = virtualCamera.isConnected ? "streaming" : "not connected"
+        virtualCameraConnected = virtualCamera.isConnected
+        virtualCameraState = virtualCameraConnected ? "streaming" : "not connected"
         virtualCameraSent = virtualCamera.sent
         virtualCameraDropped = virtualCamera.dropped
         virtualCameraPaced = virtualCamera.paced

@@ -17,7 +17,9 @@ struct SettingsView: View {
             output.tabItem { Label("Virtual camera", systemImage: "arrow.up.right.video") }
             appearance.tabItem { Label("View", systemImage: "rectangle.on.rectangle") }
         }
-        .frame(width: 480)
+        // fixed rather than fitted: the tab view sizes to whichever pane opened first, which cut
+        // the calibration buttons off the bottom of the correction pane
+        .frame(width: 480, height: 500)
     }
 
     private var correction: some View {
@@ -106,7 +108,7 @@ struct SettingsView: View {
         Form {
             Section {
                 LabeledContent("Status") {
-                    Text(virtualCamera.state.summary).foregroundStyle(.secondary)
+                    Text(extensionStatus).foregroundStyle(.secondary)
                         .multilineTextAlignment(.trailing)
                 }
                 HStack {
@@ -139,6 +141,13 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// the installer only knows what it did this launch, so an extension installed on an earlier
+    /// one reads as idle; a stream we are publishing into is the honest signal in that case
+    private var extensionStatus: String {
+        guard virtualCamera.state == .idle else { return virtualCamera.state.summary }
+        return controller.virtualCameraConnected ? "installed" : "not detected"
     }
 
     private var appearance: some View {

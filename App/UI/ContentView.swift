@@ -16,8 +16,14 @@ struct ContentView: View {
                 .ignoresSafeArea()
 
             if ui.showDiagnostics {
-                DiagnosticsHUD(controller: controller)
-                    .padding(12)
+                // taller than the window's minimum height, so it scrolls rather than losing rows
+                // off both ends
+                ScrollView(.vertical) {
+                    DiagnosticsHUD(controller: controller)
+                }
+                .scrollIndicators(.never)
+                .frame(width: 270)
+                .padding(12)
             }
 
             if case let .failed(message) = virtualCamera.state {
