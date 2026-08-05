@@ -17,7 +17,7 @@ The split is what keeps the pipeline core testable without a camera, a GUI or a 
 generate`; never edit the project file.
 
 ```bash
-swift test                  # 170 unit tests, no hardware
+swift test                  # 181 unit tests, no hardware
 swift build -c release      # the core alone
 xcodegen generate           # after any project.yml change
 ```
@@ -105,6 +105,19 @@ credential exposure on a public repository. Releases are cut locally.
 
 CI does not compile the app or extension targets — that needs a signing configuration, and the
 runner has none.
+
+## State on disk
+
+Two stores, kept apart because they answer to different rules:
+
+| What | Where | Reset by |
+|---|---|---|
+| Preferences — mirror, overlay, HUD, correction, redirect angle, viewing distance, camera | `UserDefaults` under `com.aspectus.app` | `defaults delete com.aspectus.app` |
+| Calibration — fitted angles and the samples behind them | `~/Library/Application Support/Aspectus/calibration.json` | **Reset** in Settings ▸ Correction |
+
+The calibration file holds derived angles and no imagery. Neither store leaves the machine, and a
+corrupt or future-version calibration is treated exactly as an uncalibrated install rather than
+being partially trusted.
 
 ## Observability
 

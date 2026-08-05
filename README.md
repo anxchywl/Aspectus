@@ -24,7 +24,9 @@ CoreMediaIO camera extension. No Electron, no Python runtime.
 - **Stays stable** — 1€ filters remove flicker without visible lag, and blinks stay sharp
 - **Publishes** to a system-wide virtual camera that other apps see as ordinary hardware
 
-Calibration is optional. The app works out of the box on any supported Mac.
+Calibration is optional. The app works out of the box on any supported Mac, and what you change in
+Settings — the screen-to-lens angle, the camera, the viewing distance, what the preview shows — is
+still there next launch.
 
 ## How it works
 
@@ -106,7 +108,7 @@ Every number here comes from the app's own CSV recorder in a release build, neve
 | 3b — Learned warp field (Core ML) | ⬜ blocked — no licence-clean weights |
 | 4 — Temporal quality: filters, gate, slew | ✅ wired and tested |
 | 5 — Virtual camera (CoreMediaIO) | ✅ delivers frames; untested in conferencing apps |
-| 6 — UI and hardening | 🔄 HUD, controls, recovery, signing, CI; no settings UI |
+| 6 — UI and hardening | 🔄 settings, saved preferences, camera picker, menus; soak still outstanding |
 
 Known gaps and everything not yet measured on hardware are listed at the end of
 [docs/DESIGN.md](./docs/DESIGN.md).

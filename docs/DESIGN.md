@@ -1,7 +1,7 @@
 # Aspectus for macOS — Design (Phase 1)
 
 Reference machine: Apple M3, macOS 26.6 (25G72), Xcode 26.6 (17F113), Swift 6.3.3 (measured).
-Status: phases 1–5 implemented; 170 unit tests green in a release build. The virtual camera
+Status: phases 1–6 implemented; 181 unit tests green in a release build. The virtual camera
 delivers frames to a capture client but has not been tried in any conferencing app. See
 "Measured facts" below for what has actually been run on hardware.
 
@@ -126,13 +126,24 @@ from a 136 s run with the preview window continuously visible (3,937 presented f
   from an incidental run taken while verifying capture recovery rather than under benchmark
   conditions. The table stands until a controlled run says otherwise, but the discrepancy is real
   and worth chasing before any latency conclusion is drawn from either number.
+  - **A third run says the same thing.** The phase 6 occlusion check (39 s, 1,051 frames, same
+    machine and camera) recorded tracking at **6.2 ms mean / 6.5 ms p95**, with pupils and head
+    pose available on 100 % of frames — so the low figure is not explained by there being no face
+    to find. The same run read ingest → present at **28.3 / 30.2 ms** and end-to-end at
+    **56.4 / 58.1 ms**, against the table's 45.7 / 61.2 and 89.4 / 106.0.
+  - Two of three runs now sit on the low side, and the table is the outlier. It still stands,
+    because none of the low runs was taken under benchmark conditions — this one spent 14 s of its
+    39 with the window hidden, and correction ran on only 392 of 1,051 frames, the head-pose gate
+    being the dominant fallback. But the balance of evidence has moved, and the controlled run is
+    now the blocking item before any latency work rather than a nice-to-have.
 - Resident memory over a separate 801 s run trended **down** (150 → 115 MB), so no leak is visible
   at that timescale. The full 30-minute soak is still outstanding.
-- 170 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
+- 181 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
   and reopen, 1€ jitter reduction and bounded-lag tracking, gate hysteresis / angle-limit fallback
   / slew ramp, blink preservation, filter reset on tracking loss and timestamp discontinuity,
   recovery within the 300 ms budget, gaze geometry and warp containment, metrics percentiles,
-  and the capture recovery policy for disconnect, runtime errors and sleep/wake.
+  the capture recovery policy for disconnect, runtime errors and sleep/wake, rate-meter decay
+  under a stall, and the pacer that holds publication to the advertised frame rate.
 
 ### Phase 3 gate: not passed
 
@@ -175,21 +186,53 @@ and could not have received a frame from any camera. It reported zero frames fro
 was in fact working, and every conclusion drawn from it was wrong. The control — pointing the same
 probe at the built-in camera — would have exposed it in one run.
 
+### Phase 6: UI and hardening
+
+The controls that were a seven-item toolbar are now a settings window, a menu bar and three
+toolbar buttons, and the choices survive a relaunch — nothing was persisted before, so every launch
+reset the redirect angle, the mirror and the overlay. The camera can be picked rather than
+inherited from the system default (the path existed in `CameraCapture` and had never been wired to
+anything), the extension can be removed as well as installed, and the diagnostics HUD can be hidden
+without giving up any of the rows AGENTS §7 requires.
+
+The pipeline moved up to the app so the settings window and the menu commands act on the same
+instance the preview shows, and **New Window** was removed with it: a second window used to bring
+up a second controller, and with it a second capture session on the same camera.
+
+Two measured gaps closed with it: the FPS meters no longer latch when nothing is being presented,
+and the sink no longer publishes faster than the format the extension advertised. Both policies are
+pure and live in `AspectusKit` with 11 unit tests, so neither needs a camera to check.
+
+Still open at the end of the phase: the 30-minute soak, the six-host conferencing matrix, and the
+controlled latency run the three-way tracking discrepancy now demands.
+
 ## Known gaps
 
-- Output FPS latches at its last value when the window is occluded instead of decaying to zero,
-  because the rate meter is only ticked from the drawable-presented callback. Process FPS latches
-  the same way for the same reason, which the sleep/wake run made visible: capture FPS correctly
-  read 0 while the session was suspended, but process and output still read 30.
+- ~~Output FPS latches at its last value when the window is occluded instead of decaying to zero.~~
+  **Fixed and measured.** The meters were only recomputed when an event arrived, so a source that
+  stopped went on reporting the last rate it saw. `RateMeter` now measures the sample span to *now*
+  rather than to the newest sample, and the stats timer reads it instead of remembering what the
+  last tick returned. Measured (release build, M3 / macOS 26.6, app hidden at 13.3 s and shown
+  again at 27.3 s): output FPS fell 29.8 → 17.5 → 4.1 → **0.0 within 1.0 s** of the window being
+  hidden, held 0.0 for the whole 14 s it stayed hidden, and recovered to 29.3 within 1.0 s of it
+  coming back. Capture held 30.0 throughout and process held 29.2, which is correct rather than a
+  remaining latch: the consumer loop goes on tracking and correcting while nothing is presented.
+  Four unit tests cover the decay, the recovery and the two-sample floor.
 - ~~Whether Vision supplies true pupil landmarks or falls back to the eye-contour centroid is
   unconfirmed.~~ **Resolved by measurement** (phase 1 diagnostics, release build, M3 / macOS 26.6,
   FaceTime HD at 1280×720): `leftPupil`/`rightPupil` are populated on **100 % of tracked frames**,
   one point per eye, over two runs. The contour-centroid fallback never fired. It remains in the
   tracker as a guard and is now reported in diagnostics rather than being silent.
-- `VNFaceObservation.confidence` measures **exactly 1.000** (min, mean and max) on every tracked
-  frame, so the gate's 0.6/0.4 confidence hysteresis never fires on that input alone. Only the
-  per-eye agreement factor (0.5 when one eye is unusable) ever moves it. The gate is correct; the
-  signal feeding it carries no information.
+- ~~`VNFaceObservation.confidence` measures exactly 1.000 on every tracked frame, so the gate's
+  confidence hysteresis never fires on that input alone.~~ **Superseded by measurement.** That
+  reading came from the landmarks-only request, which reports a constant 1.000. Since the tracker
+  was changed to run `VNDetectFaceRectanglesRequest` first and chain its observation into the
+  landmarks request, the confidence surviving onto the result is the detector's own. Measured over
+  a 1,051-frame release run: face confidence spans **0.584 … 0.912** (mean 0.808), and the gaze
+  confidence the gate consumes — face score × the per-eye agreement factor — spans
+  **0.348 … 0.912** (mean 0.855). So the face score now carries information, enough on its own to
+  sit under the 0.6 engage threshold; crossing the 0.4 disengage threshold still needs the 0.5
+  agreement factor, since the lowest face score alone stays above it.
 - ~~**Vision supplies no head yaw or pitch.**~~ **Diagnosed and fixed.** A landmarks-only request
   reported head pose on **0 % of tracked frames**, making both the runtime 25° and calibration 15°
   limits inert. Cause: the SDK documents `roll`/`yaw`/`pitch` as populated by
@@ -266,10 +309,18 @@ probe at the built-in camera — would have exposed it in one run.
   - An automatic reopen deliberately refuses to select Aspectus's own virtual camera, which is a
     video device like any other and would otherwise feed the pipeline its own output.
 - Restart after stop is fixed and unit-tested, but not yet verified end-to-end on hardware.
-- The virtual camera advertises 30 FPS while capture targets 60. Moot on the reference machine,
-  whose camera caps at 30, but on a camera that reaches 60 the app would publish faster than the
-  format it advertises. Resolution cannot drift the same way: it is one constant compiled into
-  both targets, pinned in the capture output, and checked against real buffers before publishing.
+- ~~The virtual camera advertises 30 FPS while capture targets 60, so on a camera that reaches 60
+  the app would publish faster than the format it advertises.~~ **Fixed, unit-tested rather than
+  measured.** Publication goes through `PublishPacer`, a credit balance that holds the sink to the
+  advertised frame duration and counts what it withholds apart from failures. Capping capture
+  instead was rejected: 60 FPS is a stated criterion, and the cap belongs at the boundary that made
+  the promise. Seven unit tests cover parity, timestamp jitter, a 60 → 30 halving, a source just
+  over the cap losing only its excess rather than beating down below it, burst suppression after a
+  gap, and a presentation clock that restarts in the past. On hardware the pacer is inert by
+  construction — the reference camera caps at 30 — and a 39 s release run published 1,046 frames
+  with **0 paced and 0 dropped**, which is the parity case and no evidence about the 60 FPS path.
+  Resolution cannot drift the same way: it is one constant compiled into both targets, pinned in
+  the capture output, and checked against real buffers before publishing.
 - The virtual camera has never been soak-tested. One session recorded resident memory at 433 MB
   against a ~110 MB baseline, after the stats recorder had already stopped writing for reasons
   that were never established. Neither observation is diagnosed, and neither should be quoted as

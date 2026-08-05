@@ -29,12 +29,16 @@ Sources/AspectusKit/          framework-free pipeline core — no AVFoundation /
   CalibrationSession.swift    the calibration flow — targets, settling, sweep, fit
   GazeDiagnostics.swift       per-frame samples and the distributions the HUD reports
   StageMetrics.swift          per-stage latency + drop counters
+  RateMeter.swift             rolling fps whose read decays instead of latching
+  PublishPacer.swift          holds publication to the rate the virtual camera advertises
 
 App/                          the macOS app target (binds the core to Apple frameworks)
+  AspectusApp.swift           the scenes — main window, settings, menu commands
+  Preferences.swift           the user choices that survive a relaunch
   Capture/                    AVCaptureSession → drop-stale box; device, session and sleep observers
   Render/                     MetalRenderer + Shaders.metal (zero-copy CVPixelBuffer → texture)
   Pipeline/                   CVReadyFrame payload, VisionFaceTracker, correctors, PipelineController
-  UI/                         SwiftUI preview, TrackingOverlay, DiagnosticsHUD, CalibrationView
+  UI/                         SwiftUI preview, overlay, HUD, calibration, settings, commands
   VirtualCamera/              system-extension installer, sink that publishes corrected frames
 
 CameraExtension/              the CoreMediaIO system extension, its own process
