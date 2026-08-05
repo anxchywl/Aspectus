@@ -51,7 +51,7 @@ jobs:
         run: brew install xcodegen
 
       - name: Provide a signing config
-        run: cp Signing.xcconfig.example Signing.xcconfig
+        run: cp scripts/Signing.xcconfig.example Signing.xcconfig
 
       # project.yml is hand-maintained and the .xcodeproj is generated, so a broken spec is
       # otherwise only discovered by whoever next runs xcodegen locally

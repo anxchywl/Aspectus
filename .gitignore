@@ -11,7 +11,7 @@ Aspectus.xcodeproj/
 # release artifacts
 dist/
 
-# local signing configuration — copy from Signing.xcconfig.example
+# local signing configuration — copy from scripts/Signing.xcconfig.example
 Signing.xcconfig
 
 # macOS

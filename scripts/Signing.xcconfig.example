@@ -1,6 +1,6 @@
 // Local signing configuration. Copy to Signing.xcconfig and fill in your own team.
 //
-//     cp Signing.xcconfig.example Signing.xcconfig
+//     cp scripts/Signing.xcconfig.example Signing.xcconfig
 //
 // Signing.xcconfig is gitignored, so no team identifier is committed. The app builds and runs
 // without a team; only the camera extension needs one, because system-extension and app-group

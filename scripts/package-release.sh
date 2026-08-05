@@ -35,7 +35,7 @@ fail() { printf '\033[31merror: %s\033[0m\n' "$1" >&2; exit 1; }
 
 # ---------------------------------------------------------------- preconditions
 
-[ -f "Signing.xcconfig" ] || fail "Signing.xcconfig is missing. Copy Signing.xcconfig.example and set your team."
+[ -f "Signing.xcconfig" ] || fail "Signing.xcconfig is missing. Copy scripts/Signing.xcconfig.example and set your team."
 TEAM_ID=$(sed -n 's/^ASPECTUS_TEAM_ID *= *//p' Signing.xcconfig | tr -d ' ')
 
 IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 || true)
