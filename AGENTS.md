@@ -4,7 +4,8 @@ Mandatory rules for AI coding agents working on Aspectus.
 These rules are strict. If a required detail is missing, stop and ask before changing code.
 
 **Sources of truth** (read before code):
-- Research, foundation choice, pipeline design, risks, test criteria: `docs/DESIGN.md`
+- Research, foundation choice, pipeline design, risks, measured facts, known gaps: `docs/DESIGN.md`
+- Build system, targets, entitlements, signing, CI, logs: `docs/INFRASTRUCTURE.md`
 - This file: agent coding rules (mandatory)
 
 ---
@@ -16,24 +17,31 @@ Aspectus is a native Apple-Silicon macOS app. There is no backend, no web fronte
 ```
 Sources/AspectusKit/          framework-free pipeline core — no AVFoundation / Metal / CoreML imports
   Frame.swift                 FrameID, FrameTiming, FrameHeader
+  Pipeline.swift              replaceable stage protocols + PipelineConfig
+  GazeTypes.swift             NormPoint/NormRect, eye/pose/gaze value types
   LatestValueBox.swift        single-slot drop-stale backpressure
   OneEuroFilter.swift         1€ temporal smoothing
+  TemporalStabilizer.swift    landmark and gaze smoothing, blink preservation, reset on loss
   CorrectionGate.swift        confidence hysteresis, angle limit, slew-limited blend
   CaptureRecovery.swift       disconnect / runtime error / sleep-wake recovery policy
+  GazeGeometry.swift          pupil + pose → gaze estimate, warp geometry, rejection reasons
+  GazeCalibration.swift       the fitted calibration: gains, bias, head coupling
+  CalibrationSession.swift    the calibration flow — targets, settling, sweep, fit
+  GazeDiagnostics.swift       per-frame samples and the distributions the HUD reports
   StageMetrics.swift          per-stage latency + drop counters
-  GazeTypes.swift             NormPoint/NormRect, eye/pose/gaze value types
-  Pipeline.swift              replaceable stage protocols + PipelineConfig
 
 App/                          the macOS app target (binds the core to Apple frameworks)
-  Capture/CameraCapture.swift AVCaptureSession → drop-stale box, session and device notifications
-  Capture/SystemSleepObserver.swift  NSWorkspace sleep and wake
+  Capture/                    AVCaptureSession → drop-stale box; device, session and sleep observers
   Render/                     MetalRenderer + Shaders.metal (zero-copy CVPixelBuffer → texture)
   Pipeline/                   CVReadyFrame payload, VisionFaceTracker, correctors, PipelineController
-  UI/                         SwiftUI preview, TrackingOverlay, DiagnosticsHUD
+  UI/                         SwiftUI preview, TrackingOverlay, DiagnosticsHUD, CalibrationView
+  VirtualCamera/              system-extension installer, sink that publishes corrected frames
 
+CameraExtension/              the CoreMediaIO system extension, its own process
+Shared/                       the format contract, compiled into both the app and the extension
 Tests/AspectusKitTests/       unit tests for the real-time invariants
 project.yml                   XcodeGen spec — the .xcodeproj is generated, never hand-edited
-docs/DESIGN.md                design document
+docs/                         DESIGN.md (product and research) and INFRASTRUCTURE.md (build and ops)
 ```
 
 Pipeline data flow:
@@ -127,8 +135,10 @@ Wait for approval on large changes before writing code.
 
 ## 7. Diagnostics Rules
 
-- The HUD shows capture/process/output FPS, per-stage and end-to-end latency, dropped frames, queue depth, memory, thermal state, camera format, model version, and configured compute units.
-- Update diagnostics on a timer, not per frame — never thrash the main actor at capture rate.
+- The HUD shows capture/process/output FPS, per-stage and end-to-end latency, dropped frames, queue depth, memory, thermal state, camera format, capture session state, virtual-camera state, and the gaze diagnostics that say why a frame was or was not corrected.
+- Name the active corrector and its version in the HUD. Once a Core ML model is in the path, its version and configured compute units go there too — those choices must be visible, not hidden.
+- Update diagnostics on a timer, not per frame — never thrash the main actor at capture rate. The tracking overlay is the one exception, because it has to follow the pixels.
+- Log the rare paths — recovery transitions, extension reconnects — to the unified log. Nobody is watching the HUD when they fire.
 
 ## 8. Git & Commit Rules
 
