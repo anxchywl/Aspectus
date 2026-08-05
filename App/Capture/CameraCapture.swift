@@ -19,7 +19,84 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     private let log = Logger(subsystem: "com.aspectus.app", category: "capture")
 
-    enum CaptureError: Error { case noDevice, cannotAddInput, cannotAddOutput }
+    enum CaptureError: Error, Equatable { case noDevice, cannotAddInput, cannotAddOutput }
+
+    /// what the session did on its own, so the pipeline can decide whether to reopen it
+    enum Event: Sendable, Equatable {
+        case runtimeError(String)
+        case interrupted
+        case interruptionEnded
+        case deviceDisconnected
+        case deviceConnected
+    }
+
+    /// notifications arrive on whatever thread AVFoundation posts from, so both the handler and the
+    /// device identity it is compared against are lock-protected
+    private let eventHandler = OSAllocatedUnfairLock<(@Sendable (Event) -> Void)?>(initialState: nil)
+    private let activeDeviceID = OSAllocatedUnfairLock<String?>(initialState: nil)
+    /// the camera the user asked for, nil meaning "whatever the system offers as default"; kept so
+    /// a reopen after a disconnect makes the same choice the first configure made
+    private let preferredDeviceID = OSAllocatedUnfairLock<String?>(initialState: nil)
+
+    override init() {
+        super.init()
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(sessionRuntimeError),
+                           name: AVCaptureSession.runtimeErrorNotification, object: session)
+        center.addObserver(self, selector: #selector(sessionWasInterrupted),
+                           name: AVCaptureSession.wasInterruptedNotification, object: session)
+        center.addObserver(self, selector: #selector(sessionInterruptionEnded),
+                           name: AVCaptureSession.interruptionEndedNotification, object: session)
+        // device notifications carry the device as the object, so they are filtered on arrival
+        // rather than re-registered every time the session is reconfigured
+        center.addObserver(self, selector: #selector(deviceWasDisconnected),
+                           name: AVCaptureDevice.wasDisconnectedNotification, object: nil)
+        center.addObserver(self, selector: #selector(deviceWasConnected),
+                           name: AVCaptureDevice.wasConnectedNotification, object: nil)
+    }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    func observeEvents(_ handler: @escaping @Sendable (Event) -> Void) {
+        eventHandler.withLock { $0 = handler }
+    }
+
+    private func emit(_ event: Event) {
+        eventHandler.withLock { $0 }?(event)
+    }
+
+    @objc private func sessionRuntimeError(_ note: Notification) {
+        let error = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
+        let message = error?.localizedDescription ?? "unknown capture error"
+        log.error("capture session runtime error: \(message, privacy: .public)")
+        isRunning = false
+        emit(.runtimeError(message))
+    }
+
+    @objc private func sessionWasInterrupted(_ note: Notification) {
+        log.error("capture session interrupted")
+        emit(.interrupted)
+    }
+
+    @objc private func sessionInterruptionEnded(_ note: Notification) {
+        log.notice("capture session interruption ended")
+        emit(.interruptionEnded)
+    }
+
+    @objc private func deviceWasDisconnected(_ note: Notification) {
+        guard let device = note.object as? AVCaptureDevice,
+              device.uniqueID == activeDeviceID.withLock({ $0 }) else { return }
+        log.error("capture device disconnected: \(device.localizedName, privacy: .public)")
+        emit(.deviceDisconnected)
+    }
+
+    /// any video camera appearing is worth reporting: after a disconnect the pipeline is looking
+    /// for a replacement, not specifically for the one that left
+    @objc private func deviceWasConnected(_ note: Notification) {
+        guard let device = note.object as? AVCaptureDevice, device.hasMediaType(.video) else { return }
+        log.notice("capture device connected: \(device.localizedName, privacy: .public)")
+        emit(.deviceConnected)
+    }
 
     static func requestAccess() async -> Bool {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -30,22 +107,28 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     func configure(preferredDeviceID: String? = nil) throws {
+        self.preferredDeviceID.withLock { $0 = preferredDeviceID }
+
         // a stop finished the box permanently, reopen before the delegate can fire again
         output.reopen()
 
         session.beginConfiguration()
 
         let device: AVCaptureDevice?
-        if let id = preferredDeviceID {
-            device = AVCaptureDevice(uniqueID: id)
+        if let id = preferredDeviceID, let preferred = AVCaptureDevice(uniqueID: id),
+           !Self.isOwnVirtualCamera(preferred) {
+            device = preferred
         } else {
-            device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
-                ?? AVCaptureDevice.default(for: .video)
+            // the preferred camera may be the one that was just unplugged, so a reopen falls back
+            // to whatever is attached rather than failing while a usable camera exists
+            device = Self.defaultDevice()
         }
         guard let device else {
+            activeDeviceID.withLock { $0 = nil }
             session.commitConfiguration()
             throw CaptureError.noDevice
         }
+        activeDeviceID.withLock { $0 = device.uniqueID }
 
         // reconfigure / device-switch path
         session.inputs.forEach { session.removeInput($0) }
@@ -94,6 +177,22 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             ? "" : " (sensor \(dims.width)×\(dims.height))"
         activeFormatDescription = "\(device.localizedName) \(Self.targetFormat.width)×"
             + "\(Self.targetFormat.height)@\(Int(fps.rounded())) BGRA\(sensor)"
+    }
+
+    private static func defaultDevice() -> AVCaptureDevice? {
+        if let builtIn = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) {
+            return builtIn
+        }
+        // AVCaptureDevice.default(for:) would happily hand back our own virtual camera once the
+        // physical one is gone, which would feed the pipeline its own output
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .external, .continuityCamera],
+            mediaType: .video, position: .unspecified)
+        return discovery.devices.first { !isOwnVirtualCamera($0) }
+    }
+
+    private static func isOwnVirtualCamera(_ device: AVCaptureDevice) -> Bool {
+        device.localizedName == VirtualCameraSink.deviceName
     }
 
     /// the benchmark operating point, fixed so latency numbers are comparable across runs
@@ -165,10 +264,26 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     func stop() {
-        guard session.isRunning else { return }
+        suspend()
+        output.finish()
+    }
+
+    /// stops the session but leaves the box open, so a recovery restart does not tear down the
+    /// consumer loop and start the gate and filters over from a stale blend
+    func suspend() {
+        guard session.isRunning else {
+            isRunning = false
+            return
+        }
         session.stopRunning()
         isRunning = false
-        output.finish()
+    }
+
+    /// reopens against whatever camera is attached now, keeping the original device preference
+    func restart() throws {
+        suspend()
+        try configure(preferredDeviceID: preferredDeviceID.withLock { $0 })
+        start()
     }
 
     // MARK: - sample delivery

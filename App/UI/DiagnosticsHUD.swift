@@ -31,6 +31,8 @@ struct DiagnosticsHUD: View {
                 row("face", "none", warn: true)
             }
             gazeRows
+            row("session", controller.captureStateLabel,
+                warn: controller.captureInterruption != nil)
             row("vcam", controller.virtualCameraState,
                 warn: controller.virtualCameraState != "streaming")
             row("vcam frames", "\(controller.virtualCameraSent) sent / \(controller.virtualCameraDropped) dropped",

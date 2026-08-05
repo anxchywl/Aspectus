@@ -28,8 +28,9 @@ final class VirtualCameraSink: @unchecked Sendable {
 
     private let log = Logger(subsystem: "com.aspectus.app", category: "sink")
 
-    /// the localized name the extension vends; matching on it avoids hard-coding a device id
-    private let deviceName = "Aspectus"
+    /// the localized name the extension vends; matching on it avoids hard-coding a device id, and
+    /// capture uses it to make sure a reopen never selects the camera we publish into
+    static let deviceName = "Aspectus"
 
     var isConnected: Bool { lock.withLock { started } }
 
@@ -45,7 +46,7 @@ final class VirtualCameraSink: @unchecked Sendable {
         defer { lock.unlock() }
         guard !started else { return true }
 
-        guard let device = findDevice(named: deviceName) else { return false }
+        guard let device = findDevice(named: Self.deviceName) else { return false }
         guard let sink = findSinkStream(of: device) else {
             log.error("the virtual camera has no sink stream")
             return false

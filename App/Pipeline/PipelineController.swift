@@ -26,6 +26,10 @@ final class PipelineController: ObservableObject {
     @Published var isRunning = false
     @Published var permissionDenied = false
 
+    /// nil while frames are flowing, otherwise why they are not — a disconnect, a session error or
+    /// sleep. the pipeline stays alive throughout, so recovery never restarts the correction state
+    @Published private(set) var captureInterruption: String?
+
     @Published var correctorName: String = "—"
 
     /// no learned model is in the correction path, so there is no version to report; stated
@@ -152,12 +156,139 @@ final class PipelineController: ObservableObject {
     private var statsTimer: Timer?
     private let benchmark = BenchmarkRecorder.fromLaunchArguments()
 
+    private let log = Logger(subsystem: "com.aspectus.app", category: "pipeline")
+    private var recovery = CaptureRecovery()
+    private var recoveryTimer: Timer?
+    private let sleepObserver = SystemSleepObserver()
+    private var lastCaptureError: String?
+    /// when the last reopen was issued, so a session that comes back silent is caught as a failure
+    /// rather than believed
+    private var restartIssuedAt: Double?
+    /// the frame count at that moment, so only frames the reopened session produced can confirm it
+    private var restartBaselineFrames = 0
+
     init() {
         // a stored calibration applies from the first frame, so a calibrated install behaves the
         // same on relaunch as it did when it was calibrated
         if let stored = storage.load() {
             calibration = stored.calibration
             activeCalibration.withLock { $0 = stored.calibration }
+        }
+        observeSystemEvents()
+    }
+
+    // MARK: - capture lifecycle
+
+    /// registered once for the lifetime of the controller: a camera can be unplugged or the machine
+    /// slept while capture is stopped, and both must be seen when it starts again
+    private func observeSystemEvents() {
+        capture.observeEvents { [weak self] event in
+            Task { @MainActor in self?.handle(event) }
+        }
+        sleepObserver.start(
+            willSleep: { [weak self] in Task { @MainActor in self?.apply(.willSleep) } },
+            didWake: { [weak self] in Task { @MainActor in self?.apply(.didWake) } })
+    }
+
+    private func handle(_ event: CameraCapture.Event) {
+        switch event {
+        case let .runtimeError(message):
+            lastCaptureError = message
+            apply(.runtimeError)
+        case .interrupted: apply(.interrupted)
+        case .interruptionEnded: apply(.interruptionEnded)
+        case .deviceDisconnected: apply(.deviceDisconnected)
+        case .deviceConnected: apply(.deviceConnected)
+        }
+    }
+
+    /// the single point where the policy meets the session, so every recovery path suspends and
+    /// reopens the same way
+    private func apply(_ event: CaptureRecovery.Event) {
+        // an explicit stop outranks recovery: the user asked for no camera, not for a broken one
+        guard isRunning else { return }
+        let action = recovery.handle(event)
+        // the recovery paths are rare and mostly unwitnessed, so each transition is recorded where
+        // it can be read after the fact rather than only shown in a HUD nobody was watching
+        log.notice("""
+            capture \(String(describing: event), privacy: .public) → \
+            \(String(describing: self.recovery.state), privacy: .public)\
+            \(action.suspendsSession ? " suspend" : "", privacy: .public)\
+            \(action.restartAfter.map { " retry in \($0)s" } ?? "", privacy: .public)
+            """)
+        if action.suspendsSession {
+            capture.suspend()
+            restartIssuedAt = nil
+        }
+        if let delay = action.restartAfter {
+            recoveryTimer?.invalidate()
+            recoveryTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+                Task { @MainActor in self?.attemptRestart() }
+            }
+        }
+        captureInterruption = interruptionText()
+    }
+
+    private func attemptRestart() {
+        guard isRunning else { return }
+        do {
+            try capture.restart()
+            formatDescription = capture.activeFormatDescription
+            lastCaptureError = nil
+            // startRunning is asynchronous, so success is claimed only once frames arrive; the
+            // stats timer confirms it or times it out
+            restartIssuedAt = HostClock.seconds
+            restartBaselineFrames = capture.output.delivered + capture.output.dropped
+            log.notice("capture reopened as \(self.formatDescription, privacy: .public), awaiting frames")
+        } catch {
+            let missing = (error as? CameraCapture.CaptureError) == .noDevice
+            lastCaptureError = missing ? "no camera attached" : "\(error)"
+            apply(.restartFailed(deviceMissing: missing))
+        }
+        captureInterruption = interruptionText()
+    }
+
+    /// a reopened session that never delivers looks identical to a healthy one from the outside,
+    /// so delivery is the only accepted proof of recovery
+    private func confirmRecovery(framesSoFar: Int, now: Double) {
+        guard let issued = restartIssuedAt else { return }
+        if framesSoFar > restartBaselineFrames {
+            restartIssuedAt = nil
+            apply(.restartSucceeded)
+        } else if now - issued > Self.restartConfirmationSeconds {
+            restartIssuedAt = nil
+            lastCaptureError = "the camera reopened but delivered no frames"
+            apply(.restartFailed(deviceMissing: false))
+        }
+    }
+
+    /// three frame intervals of slack over a cold camera start, measured at ~0.4 s on the reference
+    /// machine, so a real reopen is never mistaken for a failure
+    private static let restartConfirmationSeconds = 3.0
+
+    /// the same state in the short form the HUD has room for
+    var captureStateLabel: String {
+        switch recovery.state {
+        case .running: return isRunning ? "running" : "stopped"
+        case .interrupted: return "interrupted"
+        case let .retrying(attempt): return "retrying \(attempt)"
+        case .waitingForDevice: return "no camera"
+        case .asleep: return "asleep"
+        case .exhausted: return "failed"
+        }
+    }
+
+    private func interruptionText() -> String? {
+        switch recovery.state {
+        case .running: return nil
+        case .interrupted: return "Another app took the camera."
+        case let .retrying(attempt):
+            return "Reconnecting to the camera… (attempt \(attempt))"
+        case .waitingForDevice: return "Camera disconnected. Waiting for one to be plugged in."
+        case .asleep: return "Paused while the Mac sleeps."
+        case .exhausted:
+            let detail = lastCaptureError.map { "\n\($0)" } ?? ""
+            return "Could not reopen the camera. Press Start to try again.\(detail)"
         }
     }
 
@@ -279,6 +410,11 @@ final class PipelineController: ObservableObject {
             : "passthrough (metal unavailable)"
         lastReceivedCount = capture.output.delivered + capture.output.dropped
         lastStatsTime = HostClock.seconds
+        // an explicit start is a clean slate for recovery too, including one that had given up
+        recovery = CaptureRecovery()
+        restartIssuedAt = nil
+        lastCaptureError = nil
+        captureInterruption = nil
         // a restart must not report the previous session's distributions
         diagnostics.reset()
         gaze = .empty
@@ -293,6 +429,9 @@ final class PipelineController: ObservableObject {
         capture.stop()
         consumerTask?.cancel(); consumerTask = nil
         statsTimer?.invalidate(); statsTimer = nil
+        recoveryTimer?.invalidate(); recoveryTimer = nil
+        restartIssuedAt = nil
+        captureInterruption = nil
         renderer?.flush()
         isRunning = false
     }
@@ -564,6 +703,7 @@ final class PipelineController: ObservableObject {
         let now = HostClock.seconds
         let dt = now - lastStatsTime
         if dt > 0 { captureFPS = Double(received - lastReceivedCount) / dt }
+        confirmRecovery(framesSoFar: received, now: now)
         lastReceivedCount = received
         lastStatsTime = now
 

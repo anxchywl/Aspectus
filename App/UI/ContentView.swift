@@ -24,6 +24,8 @@ struct ContentView: View {
                 overlayMessage(virtualCamera.state.summary)
             } else if controller.permissionDenied {
                 overlayMessage("Camera access denied.\nEnable it in System Settings ▸ Privacy & Security ▸ Camera.")
+            } else if let interruption = controller.captureInterruption {
+                overlayMessage(interruption)
             } else if !controller.isRunning {
                 overlayMessage("Starting camera…")
             }
