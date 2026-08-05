@@ -1,9 +1,9 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var controller = PipelineController()
-    @StateObject private var virtualCamera = SystemExtensionInstaller()
-    @State private var showCalibration = false
+    @ObservedObject var controller: PipelineController
+    @ObservedObject var virtualCamera: SystemExtensionInstaller
+    @ObservedObject var ui: UIState
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -15,8 +15,10 @@ struct ContentView: View {
             TrackingOverlay(controller: controller)
                 .ignoresSafeArea()
 
-            DiagnosticsHUD(controller: controller)
-                .padding(12)
+            if ui.showDiagnostics {
+                DiagnosticsHUD(controller: controller)
+                    .padding(12)
+            }
 
             if case let .failed(message) = virtualCamera.state {
                 overlayMessage("Virtual camera could not install.\n\(message)")
@@ -31,17 +33,8 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 640, minHeight: 480)
+        // only the controls worth reaching for mid-call; the rest is in settings and the menus
         .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Toggle("Mirror", isOn: Binding(
-                    get: { controller.mirrorPreview },
-                    set: { controller.mirrorPreview = $0 }))
-            }
-            ToolbarItem(placement: .automatic) {
-                Toggle("Overlay", isOn: Binding(
-                    get: { controller.showOverlay },
-                    set: { controller.showOverlay = $0 }))
-            }
             ToolbarItem(placement: .automatic) {
                 Toggle("Correct", isOn: Binding(
                     get: { controller.correctionEnabled },
@@ -49,33 +42,13 @@ struct ContentView: View {
                 .help("Toggle gaze correction to compare against the original frame")
             }
             ToolbarItem(placement: .automatic) {
-                HStack(spacing: 6) {
-                    Text("Amount")
-                    Slider(value: Binding(get: { controller.redirectDegrees },
-                                          set: { controller.redirectDegrees = $0 }),
-                           in: 0...18)
-                        .frame(width: 110)
-                        .accessibilityLabel("Gaze correction amount in degrees")
-                    Text(String(format: "%.0f°", controller.redirectDegrees))
-                        .monospacedDigit()
-                }
-                .help("Angle between your screen and the camera lens")
-            }
-            ToolbarItem(placement: .automatic) {
                 Button(controller.calibration == nil ? "Calibrate" : "Calibrated") {
-                    showCalibration = true
+                    ui.showCalibration = true
                 }
                 .help(controller.calibration == nil
                       ? "Measure how your eyes read relative to the camera"
                       : "Recalibrate or reset the stored calibration")
                 .disabled(!controller.isRunning)
-            }
-            ToolbarItem(placement: .automatic) {
-                Button(virtualCamera.state == .activated ? "Camera installed" : "Install camera") {
-                    virtualCamera.activate()
-                }
-                .help(virtualCamera.state.summary)
-                .disabled(virtualCamera.state == .requesting)
             }
             ToolbarItem(placement: .automatic) {
                 Button(controller.isRunning ? "Stop" : "Start") {
@@ -84,7 +57,7 @@ struct ContentView: View {
                 }
             }
         }
-        .sheet(isPresented: $showCalibration) {
+        .sheet(isPresented: $ui.showCalibration) {
             CalibrationView(controller: controller)
         }
         .task { await controller.start() }

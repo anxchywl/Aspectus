@@ -33,7 +33,7 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     /// notifications arrive on whatever thread AVFoundation posts from, so both the handler and the
     /// device identity it is compared against are lock-protected
     private let eventHandler = OSAllocatedUnfairLock<(@Sendable (Event) -> Void)?>(initialState: nil)
-    private let activeDeviceID = OSAllocatedUnfairLock<String?>(initialState: nil)
+    private let activeDeviceIDStore = OSAllocatedUnfairLock<String?>(initialState: nil)
     /// the camera the user asked for, nil meaning "whatever the system offers as default"; kept so
     /// a reopen after a disconnect makes the same choice the first configure made
     private let preferredDeviceID = OSAllocatedUnfairLock<String?>(initialState: nil)
@@ -85,7 +85,7 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     @objc private func deviceWasDisconnected(_ note: Notification) {
         guard let device = note.object as? AVCaptureDevice,
-              device.uniqueID == activeDeviceID.withLock({ $0 }) else { return }
+              device.uniqueID == activeDeviceIDStore.withLock({ $0 }) else { return }
         log.error("capture device disconnected: \(device.localizedName, privacy: .public)")
         emit(.deviceDisconnected)
     }
@@ -124,11 +124,11 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             device = Self.defaultDevice()
         }
         guard let device else {
-            activeDeviceID.withLock { $0 = nil }
+            activeDeviceIDStore.withLock { $0 = nil }
             session.commitConfiguration()
             throw CaptureError.noDevice
         }
-        activeDeviceID.withLock { $0 = device.uniqueID }
+        activeDeviceIDStore.withLock { $0 = device.uniqueID }
 
         // reconfigure / device-switch path
         session.inputs.forEach { session.removeInput($0) }
@@ -178,6 +178,26 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         activeFormatDescription = "\(device.localizedName) \(Self.targetFormat.width)×"
             + "\(Self.targetFormat.height)@\(Int(fps.rounded())) BGRA\(sensor)"
     }
+
+    /// a camera the user can pick, identified by the id a reopen is resolved against
+    struct DeviceOption: Identifiable, Hashable, Sendable {
+        let id: String
+        let name: String
+    }
+
+    /// every attached video camera except the one we publish into, which would otherwise feed the
+    /// pipeline its own output
+    static func availableDevices() -> [DeviceOption] {
+        AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .external, .continuityCamera],
+            mediaType: .video, position: .unspecified)
+            .devices
+            .filter { !isOwnVirtualCamera($0) }
+            .map { DeviceOption(id: $0.uniqueID, name: $0.localizedName) }
+    }
+
+    /// the camera actually in use, which is not always the one asked for after a disconnect
+    var activeDeviceID: String? { activeDeviceIDStore.withLock { $0 } }
 
     private static func defaultDevice() -> AVCaptureDevice? {
         if let builtIn = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) {

@@ -47,6 +47,14 @@ final class PipelineController: ObservableObject {
     @Published private(set) var virtualCameraDropped = 0
     @Published private(set) var virtualCameraPaced = 0
 
+    /// the cameras that can be selected, refreshed when one is attached or removed rather than
+    /// polled, since discovery is not free
+    @Published private(set) var cameras: [CameraCapture.DeviceOption] = []
+    /// the camera the user asked for, nil meaning whatever the system offers as default
+    @Published private(set) var preferredCameraID: String?
+    /// the camera actually open, which after a disconnect need not be the one asked for
+    @Published private(set) var activeCameraID: String?
+
     /// the active calibration, nil when the install has never been calibrated or was reset
     @Published private(set) var calibration: GazeCalibration?
     /// non-nil only while a calibration flow is running
@@ -89,17 +97,26 @@ final class PipelineController: ObservableObject {
     /// inherit; processing/end-to-end both include compositor time the extension will not pay
     @Published var pipelineMeanMs: Double = 0
     @Published var pipelineP95Ms: Double = 0
-    @Published var showOverlay = true
+    @Published var showOverlay = true { didSet { preferences.showOverlay = showOverlay } }
     @Published var imageWidth: Int = 0
     @Published var imageHeight: Int = 0
 
-    var mirrorPreview = true { didSet { renderer?.mirror = mirrorPreview } }
+    @Published var mirrorPreview = true {
+        didSet {
+            renderer?.mirror = mirrorPreview
+            preferences.mirrorPreview = mirrorPreview
+        }
+    }
 
     /// A/B switch for the smoke test, read by the detached loop; it can only suppress correction,
     /// never loosen the confidence, angle, openness or head-pose gates
     var correctionEnabled: Bool {
         get { correctionSwitch.withLock { $0 } }
-        set { correctionSwitch.withLock { $0 = newValue }; objectWillChange.send() }
+        set {
+            objectWillChange.send()
+            correctionSwitch.withLock { $0 = newValue }
+            preferences.correctionEnabled = newValue
+        }
     }
 
     private let correctionSwitch = OSAllocatedUnfairLock(initialState: true)
@@ -109,11 +126,16 @@ final class PipelineController: ObservableObject {
     var redirectDegrees: Double {
         get { redirectStore.withLock { $0 } }
         set {
-            let limit = config.gate.maxCorrectionDegrees
-            redirectStore.withLock { $0 = max(-limit, min(limit, newValue)) }
             objectWillChange.send()
+            let clamped = max(-maxRedirectDegrees, min(maxRedirectDegrees, newValue))
+            redirectStore.withLock { $0 = clamped }
+            preferences.redirectDegrees = clamped
         }
     }
+
+    /// the gate's trusted angle, exposed so the settings slider cannot offer a value the gate
+    /// would refuse
+    var maxRedirectDegrees: Double { config.gate.maxCorrectionDegrees }
 
     private let redirectStore = OSAllocatedUnfairLock(initialState: 12.0)
 
@@ -125,8 +147,12 @@ final class PipelineController: ObservableObject {
 
     /// supplied by the user because macOS gives no camera field of view, so it cannot be measured;
     /// the fitted gain is only as good as this number and the UI says so
-    @Published var viewingDistanceMM: Double = 550
+    @Published var viewingDistanceMM: Double = 550 {
+        didSet { preferences.viewingDistanceMM = viewingDistanceMM }
+    }
     private var calibrationTimer: Timer?
+
+    private let preferences = Preferences()
 
     private let capture = CameraCapture()
     private let tracker = VisionFaceTracker()
@@ -173,7 +199,42 @@ final class PipelineController: ObservableObject {
             calibration = stored.calibration
             activeCalibration.withLock { $0 = stored.calibration }
         }
+        restorePreferences()
+        cameras = CameraCapture.availableDevices()
         observeSystemEvents()
+    }
+
+    /// assigned through the same setters the UI uses, so a restored value is clamped and applied
+    /// exactly as a typed one would be
+    private func restorePreferences() {
+        mirrorPreview = preferences.mirrorPreview
+        showOverlay = preferences.showOverlay
+        correctionEnabled = preferences.correctionEnabled
+        redirectDegrees = preferences.redirectDegrees
+        viewingDistanceMM = preferences.viewingDistanceMM
+        preferredCameraID = preferences.preferredCameraID
+    }
+
+    /// switching camera reconfigures the session in place: the consumer loop, the gate and the
+    /// filters stay up, so a switch costs no more state than a recovery reopen does
+    func selectCamera(_ id: String?) {
+        preferredCameraID = id
+        preferences.preferredCameraID = id
+        guard isRunning else { return }
+        capture.suspend()
+        do {
+            try capture.configure(preferredDeviceID: id)
+            capture.start()
+            lastCaptureError = nil
+            restartIssuedAt = nil
+        } catch {
+            let missing = (error as? CameraCapture.CaptureError) == .noDevice
+            lastCaptureError = missing ? "no camera attached" : "\(error)"
+            apply(.restartFailed(deviceMissing: missing))
+        }
+        formatDescription = capture.activeFormatDescription
+        activeCameraID = capture.activeDeviceID
+        captureInterruption = interruptionText()
     }
 
     // MARK: - capture lifecycle
@@ -196,8 +257,12 @@ final class PipelineController: ObservableObject {
             apply(.runtimeError)
         case .interrupted: apply(.interrupted)
         case .interruptionEnded: apply(.interruptionEnded)
-        case .deviceDisconnected: apply(.deviceDisconnected)
-        case .deviceConnected: apply(.deviceConnected)
+        case .deviceDisconnected:
+            cameras = CameraCapture.availableDevices()
+            apply(.deviceDisconnected)
+        case .deviceConnected:
+            cameras = CameraCapture.availableDevices()
+            apply(.deviceConnected)
         }
     }
 
@@ -398,12 +463,13 @@ final class PipelineController: ObservableObject {
             return
         }
         do {
-            try capture.configure()
+            try capture.configure(preferredDeviceID: preferredCameraID)
         } catch {
             formatDescription = "capture error: \(error)"
             return
         }
         formatDescription = capture.activeFormatDescription
+        activeCameraID = capture.activeDeviceID
         correctorName = corrector is MetalEyeCorrector
             ? "geometric warp (metal, gpu)"
             : "passthrough (metal unavailable)"
@@ -713,6 +779,7 @@ final class PipelineController: ObservableObject {
         memoryMB = Self.residentMemoryMB()
         thermalState = Self.thermalString()
         formatDescription = capture.activeFormatDescription
+        activeCameraID = capture.activeDeviceID
 
         benchmark?.record(.init(captureFPS: captureFPS, processFPS: processFPS, outputFPS: outputFPS,
                                 tracking: t, correction: c, pipeline: pl, processing: p, endToEnd: e,
