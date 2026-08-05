@@ -144,11 +144,9 @@ final class PipelineController: ObservableObject {
     private let virtualCamera = VirtualCameraSink()
     private weak var renderer: MetalRenderer?
 
-    // fps meters updated on each event, snapshotted by the stats timer
+    // fps meters ticked on each event and read on the stats timer, so a stall reads as a stall
     private var processMeter = RateMeter()
     private var outputMeter = RateMeter()
-    private var processFPSValue: Double = 0
-    private var outputFPSValue: Double = 0
     private var lastReceivedCount = 0
     private var lastStatsTime = HostClock.seconds
 
@@ -387,7 +385,7 @@ final class PipelineController: ObservableObject {
             e2e.record(ms: (presentedAt - timing.captureHostTime) * 1000)
             Task { @MainActor in
                 guard let self else { return }
-                self.outputFPSValue = self.outputMeter.tick(at: presentedAt)
+                self.outputMeter.tick(at: presentedAt)
             }
         }
     }
@@ -591,7 +589,7 @@ final class PipelineController: ObservableObject {
                 let overlay = applied
                 await MainActor.run { [weak self] in
                     guard let self else { return }
-                    self.processFPSValue = self.processMeter.tick(at: HostClock.seconds)
+                    self.processMeter.tick(at: HostClock.seconds)
                     self.tracking = overlay
                     if self.imageWidth != frame.header.width { self.imageWidth = frame.header.width }
                     if self.imageHeight != frame.header.height { self.imageHeight = frame.header.height }
@@ -693,8 +691,6 @@ final class PipelineController: ObservableObject {
         virtualCameraSent = virtualCamera.sent
         virtualCameraDropped = virtualCamera.dropped
 
-        processFPS = processFPSValue
-        outputFPS = outputFPSValue
         droppedFrames = capture.output.dropped
         inFlight = capture.output.depth
 
@@ -702,6 +698,11 @@ final class PipelineController: ObservableObject {
         let received = capture.output.delivered + capture.output.dropped
         let now = HostClock.seconds
         let dt = now - lastStatsTime
+
+        // read rather than remembered: an occluded window presents nothing, and a rate that is only
+        // recomputed when a frame arrives would go on reporting the last one it saw
+        processFPS = processMeter.rate(asOf: now)
+        outputFPS = outputMeter.rate(asOf: now)
         if dt > 0 { captureFPS = Double(received - lastReceivedCount) / dt }
         confirmRecovery(framesSoFar: received, now: now)
         lastReceivedCount = received
