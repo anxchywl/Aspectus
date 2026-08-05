@@ -7,18 +7,18 @@ delivers frames to a capture client but has not been tried in any conferencing a
 
 ## 1. Candidate comparison
 
-Shortlist of five, judged on reuse value — not stars, not README benchmarks.
+Shortlist of four, judged on reuse value — not stars, not README benchmarks.
 
 | # | Candidate | Approach | Reuse | Apple-Silicon / Core ML fit | Maintenance | License (code / weights) | Integration difficulty | Critical limitation |
 |---|-----------|----------|-------|------------------------------|-------------|--------------------------|------------------------|---------------------|
 | 1 | **chihfanhsu/gaze_correction** ("Look at me!", ACM TOMM 2019) | Warping CNN: predicts a per-pixel flow field over the eye patch, bilinear-resamples the *original* pixels | The **method** and reference architecture; small net, ANE-friendly conv stack | High — conv-only + a grid-sample op; convertible via coremltools | Low (TF1.8, ~2019) | **BSD-3** © 2019 Chih-Fan Hsu (file is named `LICENSES`, so GitHub reports "no licence"); **weights: train-your-own** | Medium — reimplement/convert; must add our own sampler | TF1.8, TCP demo, needs calibration; weights not shipped |
-| 3 | **Apple Vision** (`VNDetectFaceLandmarks`, rev 3) | 76-point landmarks **incl. pupils** + face pose, on-device | Tracking stage wholesale — face bbox, eye landmarks, pupil centers, roll/yaw/pitch | Native, runs on ANE in ms, zero conversion, no telemetry | Apple-maintained | Apple SDK | Low | 2D pupil only (no true 3D gaze vector); needs a gaze head or geometric estimate |
-| 4 | **L2CS-Net / MPIIGaze-style estimator** | Appearance-based gaze *direction* regressor | Optional gaze-angle head to drive correction magnitude | Small ResNet → Core ML convertible | Moderate | Research (MIT-ish); check weights | Medium | Estimates direction, does **not** redirect; extra model in budget |
-| 5 | **RTGaze (2025) / GazeNeRF / 3D-eyeball** | Full-face novel-view / 3D-aware synthesis | Reference for quality ceiling only | Poor for v1 — 61 ms/frame reported, heavy | Active research | Research | High | Too slow for 60 FPS / <20 ms; hallucinates whole face → identity/glasses/temporal risk |
+| 2 | **Apple Vision** (`VNDetectFaceLandmarks`, rev 3) | 76-point landmarks **incl. pupils** + face pose, on-device | Tracking stage wholesale — face bbox, eye landmarks, pupil centers, roll/yaw/pitch | Native, runs on ANE in ms, zero conversion, no telemetry | Apple-maintained | Apple SDK | Low | 2D pupil only (no true 3D gaze vector); needs a gaze head or geometric estimate |
+| 3 | **L2CS-Net / MPIIGaze-style estimator** | Appearance-based gaze *direction* regressor | Optional gaze-angle head to drive correction magnitude | Small ResNet → Core ML convertible | Moderate | Research (MIT-ish); check weights | Medium | Estimates direction, does **not** redirect; extra model in budget |
+| 4 | **RTGaze (2025) / GazeNeRF / 3D-eyeball** | Full-face novel-view / 3D-aware synthesis | Reference for quality ceiling only | Poor for v1 — 61 ms/frame reported, heavy | Active research | Research | High | Too slow for 60 FPS / <20 ms; hallucinates whole face → identity/glasses/temporal risk |
 
 ## 2. Selected foundation & rationale
 
-**Warp-field correction (candidates 1+2) + Apple Vision tracking (3), reimplemented natively in Swift/Core ML/Metal.**
+**Warp-field correction (candidate 1) + Apple Vision tracking (2), reimplemented natively in Swift/Core ML/Metal.**
 
 Why the warp-field family wins for *this* product spec:
 - It **resamples the original pixels** instead of synthesizing them, so eye color, eyelids,
@@ -28,28 +28,30 @@ Why the warp-field family wins for *this* product spec:
   the right side of the quality/latency trade for 60 FPS.
 - The network is conv-only + a grid-sample; **Core ML / ANE-friendly** and small enough to
   fit the <20 ms budget with margin for two eye patches.
-- Both reference implementations are **BSD-3**, so the *method and architecture* can be
+- The reference implementation is **BSD-3**, so the *method and architecture* can be
   reimplemented natively (no Python/TF) with attribution.
 
-The published **weights cannot be used**, which is a change from the original plan. Verified:
-the BSD-3 licence covers the repository tree, but the weights ship as separate GitHub release
-assets with no licence grant of any kind, and the method was trained and evaluated on the
-Columbia Gaze dataset (CAVE), which states it "is made available for non-commercial use only".
-Provenance of the specific shipped checkpoints is undocumented. That is the "unverified or
-legally unclear model" case, so the weights are out of scope and any learned warp field must be
+**No usable pretrained weights exist**, which is a change from the original plan. Verified: the
+BSD-3 licence covers the reference repository's tree, but that project ships no weights at all —
+training your own is the documented path. The third-party checkpoints that circulate for this
+method are published as release assets with no licence grant of any kind and undocumented
+provenance, and the method was trained and evaluated on the Columbia Gaze dataset (CAVE), which
+states it "is made available for non-commercial use only". That is the "unverified or legally
+unclear model" case, so pretrained weights are out of scope and any learned warp field must be
 trained from data we can account for.
 
 Apple Vision supplies primary-face + eye + **pupil** landmarks and head pose on the ANE for
 near-zero cost, removing dlib/MediaPipe. Gaze magnitude for correction is derived geometrically
-from pupil-vs-eye-center + head pose first; a small Core ML gaze head (candidate 4) is added
+from pupil-vs-eye-center + head pose first; a small Core ML gaze head (candidate 3) is added
 **only if** the prototype shows the geometric estimate is insufficient.
 
 ## 3. Rejected alternatives
-- **Full-face synthesis (RTGaze/GazeNeRF/3D-eyeball, cand. 5):** too slow, and whole-face
+- **Full-face synthesis (RTGaze/GazeNeRF/3D-eyeball, cand. 4):** too slow, and whole-face
   hallucination risks identity drift, glasses artifacts, and flicker — the opposite of the spec.
-- **Running candidate 2 as-is:** Python/TF runtime is explicitly forbidden and won't hit latency.
-- **Shipping candidate 2's pretrained weights:** no licence grant, undocumented provenance, and a
-  training set restricted to non-commercial use. Rejected on those grounds, not technical ones.
+- **Running a Python/TensorFlow reference implementation as-is:** that runtime is explicitly
+  forbidden and won't hit latency.
+- **Shipping third-party pretrained warp weights:** no licence grant, undocumented provenance, and
+  a training set restricted to non-commercial use. Rejected on those grounds, not technical ones.
 - **dlib/MediaPipe tracking:** redundant given Vision's on-ANE landmarks+pupils.
 - **NVIDIA Maxine / Apple's private FaceTime effect:** closed, not reusable.
 
