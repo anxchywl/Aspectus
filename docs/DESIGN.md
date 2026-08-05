@@ -121,6 +121,11 @@ from a 136 s run with the preview window continuously visible (3,937 presented f
 | Capture → present (end-to-end) | 89.4 ms | 106.0 ms |
 
 - Frames in flight never exceeded 1; 11 drops in 3,937 frames; thermal state nominal throughout.
+- **Unexplained, and not yet reconciled:** a later 15 s release run on the same machine and camera
+  recorded face tracking at **6.1 ms mean / 6.4 ms p95** — roughly a third of the figures above,
+  from an incidental run taken while verifying capture recovery rather than under benchmark
+  conditions. The table stands until a controlled run says otherwise, but the discrepancy is real
+  and worth chasing before any latency conclusion is drawn from either number.
 - Resident memory over a separate 801 s run trended **down** (150 → 115 MB), so no leak is visible
   at that timescale. The full 30-minute soak is still outstanding.
 - 170 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
