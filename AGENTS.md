@@ -19,12 +19,14 @@ Sources/AspectusKit/          framework-free pipeline core — no AVFoundation /
   LatestValueBox.swift        single-slot drop-stale backpressure
   OneEuroFilter.swift         1€ temporal smoothing
   CorrectionGate.swift        confidence hysteresis, angle limit, slew-limited blend
+  CaptureRecovery.swift       disconnect / runtime error / sleep-wake recovery policy
   StageMetrics.swift          per-stage latency + drop counters
   GazeTypes.swift             NormPoint/NormRect, eye/pose/gaze value types
   Pipeline.swift              replaceable stage protocols + PipelineConfig
 
 App/                          the macOS app target (binds the core to Apple frameworks)
-  Capture/CameraCapture.swift AVCaptureSession → drop-stale box
+  Capture/CameraCapture.swift AVCaptureSession → drop-stale box, session and device notifications
+  Capture/SystemSleepObserver.swift  NSWorkspace sleep and wake
   Render/                     MetalRenderer + Shaders.metal (zero-copy CVPixelBuffer → texture)
   Pipeline/                   CVReadyFrame payload, VisionFaceTracker, correctors, PipelineController
   UI/                         SwiftUI preview, TrackingOverlay, DiagnosticsHUD

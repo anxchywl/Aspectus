@@ -125,11 +125,11 @@ PyTorch and ONNX are used only for model evaluation, training, and conversion �
 ```
 aspectus/
   Package.swift            AspectusKit — framework-free pipeline core
-  Sources/AspectusKit/     backpressure, temporal filters, correction gate, metrics, stage protocols
+  Sources/AspectusKit/     backpressure, temporal filters, correction gate, capture recovery, metrics, stage protocols
   Tests/AspectusKitTests/  unit tests for the real-time invariants
   project.yml              XcodeGen spec for the app and the camera extension
   App/
-    Capture/               AVFoundation session → drop-stale box
+    Capture/               AVFoundation session → drop-stale box, disconnect and sleep/wake observers
     Render/                Metal renderer + shaders
     Pipeline/              controller wiring, frame payload, tracker, corrector
     UI/                    SwiftUI preview, tracking overlay, diagnostics HUD
@@ -156,7 +156,7 @@ Research and technical design: [docs/DESIGN.md](./docs/DESIGN.md)
 | 3b — Learned warp field | Core ML flow-field model | ⬜ blocked — no licence-clean weights ([why](./docs/DESIGN.md#3-rejected-alternatives)) |
 | 4 — Temporal quality | 1€ filters, gate hysteresis and slew wired into the live pipeline | ✅ wired + tested |
 | 5 — Virtual camera | CoreMediaIO Camera Extension | ✅ installs and delivers frames; untested in conferencing apps |
-| 6 — UI & hardening | Full SwiftUI, diagnostics, settings, release packaging | ⬜ HUD, basic controls, signing/notarization/CI; no settings UI, no licence |
+| 6 — UI & hardening | Full SwiftUI, diagnostics, settings, release packaging | ⬜ HUD, basic controls, signing/notarization/CI, camera disconnect and sleep/wake recovery; no settings UI, no licence |
 
 Known gaps are listed at the end of [docs/DESIGN.md](./docs/DESIGN.md).
 

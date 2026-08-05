@@ -1,7 +1,7 @@
 # Aspectus for macOS — Design (Phase 1)
 
 Reference machine: Apple M3, macOS 26.6 (25G72), Xcode 26.6 (17F113), Swift 6.3.3 (measured).
-Status: phases 1–5 implemented; 156 unit tests green in a release build. The virtual camera
+Status: phases 1–5 implemented; 170 unit tests green in a release build. The virtual camera
 delivers frames to a capture client but has not been tried in any conferencing app. See
 "Measured facts" below for what has actually been run on hardware.
 
@@ -121,10 +121,11 @@ from a 136 s run with the preview window continuously visible (3,937 presented f
 - Frames in flight never exceeded 1; 11 drops in 3,937 frames; thermal state nominal throughout.
 - Resident memory over a separate 801 s run trended **down** (150 → 115 MB), so no leak is visible
   at that timescale. The full 30-minute soak is still outstanding.
-- 156 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
+- 170 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
   and reopen, 1€ jitter reduction and bounded-lag tracking, gate hysteresis / angle-limit fallback
   / slew ramp, blink preservation, filter reset on tracking loss and timestamp discontinuity,
-  recovery within the 300 ms budget, gaze geometry and warp containment, metrics percentiles.
+  recovery within the 300 ms budget, gaze geometry and warp containment, metrics percentiles,
+  and the capture recovery policy for disconnect, runtime errors and sleep/wake.
 
 ### Phase 3 gate: not passed
 
@@ -170,7 +171,9 @@ probe at the built-in camera — would have exposed it in one run.
 ## Known gaps
 
 - Output FPS latches at its last value when the window is occluded instead of decaying to zero,
-  because the rate meter is only ticked from the drawable-presented callback.
+  because the rate meter is only ticked from the drawable-presented callback. Process FPS latches
+  the same way for the same reason, which the sleep/wake run made visible: capture FPS correctly
+  read 0 while the session was suspended, but process and output still read 30.
 - ~~Whether Vision supplies true pupil landmarks or falls back to the eye-contour centroid is
   unconfirmed.~~ **Resolved by measurement** (phase 1 diagnostics, release build, M3 / macOS 26.6,
   FaceTime HD at 1280×720): `leftPupil`/`rightPupil` are populated on **100 % of tracked frames**,
@@ -231,7 +234,30 @@ probe at the built-in camera — would have exposed it in one run.
   which reads as a constant **≈ +4° of apparent upward gaze** (raw pitch stayed within +2.2°…+5.7°
   and never went negative). This is the eyelid occlusion effect and is what phase 2 calibration
   has to remove.
-- No handling yet for camera disconnect, session runtime errors, or sleep/wake.
+- **Camera disconnect, session runtime errors and sleep/wake are handled, but only the healthy path
+  is verified on hardware.** The session posts runtime errors, interruptions and device
+  connect/disconnect; `NSWorkspace` supplies sleep and wake. The policy that turns those into
+  decisions is `CaptureRecovery` in the kit, so it is unit-tested without a camera: sleep suspends
+  and only waking restarts, a disconnect suspends and tries once more in case another camera is
+  attached, a missing device stops the ladder and waits for a connect notification, and repeated
+  failures back off (0.5–8 s) and then give up rather than reopening a broken camera forever.
+  Recovery is only claimed once frames actually arrive — a session that reopens and stays silent is
+  timed out at 3 s and counted as a failure. The pipeline itself is never torn down, so the gate and
+  the filters do not restart from a stale blend.
+  - **Sleep/wake is measured on hardware** (release build, M3 / macOS 26.6, software sleep at
+    23:49:06, keyboard wake at 23:49:21). `willSleep` arrived 5 s *before* the machine actually
+    slept and suspended the session there, so the camera was released while the system was still
+    up. On wake: `didWake → retrying(attempt: 1)` at 23:49:21.80, reopen issued 0.5 s later
+    (`FaceTime HD Camera 1280×720@30 BGRA`), delivery confirmed at 23:49:23.60 — **1.8 s from wake
+    to frames**, then a sustained 30.0 fps for the remaining 60 s of the run. Dropped frames stayed
+    at 1 across the whole cycle, so recovery costs no drop burst, and resident memory did not grow
+    (240 → 149 → 157 MB).
+  - Also measured: registering the observers costs nothing on the healthy path — capture holds
+    30.0 fps with process and output rates unchanged.
+  - The disconnect and runtime-error transitions are unit-tested but have **not** been exercised on
+    hardware — the reference machine's camera is built in and cannot be unplugged.
+  - An automatic reopen deliberately refuses to select Aspectus's own virtual camera, which is a
+    video device like any other and would otherwise feed the pipeline its own output.
 - Restart after stop is fixed and unit-tested, but not yet verified end-to-end on hardware.
 - The virtual camera advertises 30 FPS while capture targets 60. Moot on the reference machine,
   whose camera caps at 30, but on a camera that reaches 60 the app would publish faster than the
