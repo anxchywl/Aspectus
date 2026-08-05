@@ -743,17 +743,3 @@ final class PipelineController: ObservableObject {
         }
     }
 }
-
-private extension TrackingResult {
-    static func neutral(for header: FrameHeader) -> TrackingResult {
-        let eye = EyeObservation(region: NormRect(x: 0, y: 0, width: 0, height: 0),
-                                 pupilCenter: NormPoint(x: 0.5, y: 0.5), openness: 1)
-        return TrackingResult(faceBounds: NormRect(x: 0, y: 0, width: 1, height: 1),
-                              leftEye: eye, rightEye: eye,
-                              headPose: HeadPose(yaw: 0, pitch: 0, roll: 0), confidence: 0)
-    }
-}
-
-private extension CorrectionRequest {
-    static var neutral: CorrectionRequest { CorrectionRequest(yawOffset: 0, pitchOffset: 0, strength: 0) }
-}
