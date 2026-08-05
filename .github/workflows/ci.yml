@@ -16,7 +16,10 @@ jobs:
     runs-on: macos-latest
 
     steps:
+      # the whitespace check diffs against HEAD~1, which a depth-1 clone does not have
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
 
       - name: Report toolchain
         run: |
@@ -32,8 +35,10 @@ jobs:
       - name: Run tests
         run: swift test
 
+      # on a pull request HEAD is the merge commit, so this covers the whole branch; on a push it
+      # covers the last commit only, which is what a depth-2 clone can see
       - name: Check for whitespace errors
-        run: git diff --check HEAD~1 HEAD || true
+        run: git diff --check HEAD~1 HEAD
 
   spec:
     name: Project Spec
