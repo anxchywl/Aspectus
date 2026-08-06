@@ -194,8 +194,28 @@ justifies reassessing the correction model on speed grounds; that question is cl
 What still misses is **ingest → present at 32.0 ms p95**, down from the 61.2 ms originally
 recorded but still above 20 ms, and every millisecond of the gap is display-path latency after the
 frame is finished — compositor and drawable scheduling, which the virtual camera does not pay.
-Queued, and still worth doing: downscale the tracker input, and consume the camera's native YUV
-instead of converting to BGRA per frame.
+Queued, and still worth doing — but as efficiency work, not as a fix for this number: downscale the
+tracker input, and consume the camera's native YUV instead of converting to BGRA per frame. Neither
+is on the display path, so neither can move ingest → present. Filing them under this gate was a
+mistake: the stages they shrink already fit the budget.
+
+The YUV change in particular is larger than one line of `videoSettings`. Its scope was established
+and then deliberately deferred until the host matrix is finished, so that a host failure has one
+variable rather than two:
+
+- the extension advertises `kCVPixelFormatType_32BGRA`, and CMIO forwards a format mismatch to
+  hosts without complaint, so what the sink publishes has to stay BGRA unless the advertised format
+  changes with it — and changing that would invalidate the one host result we have.
+- passthrough returns the capture buffer itself, and correction is detected downstream by buffer
+  identity (`corrected.pixelBuffer !== frame.pixelBuffer`). On a YUV capture buffer both the preview
+  renderer and the sink would receive pixels they cannot sample, so passthrough — 10 % of frames in
+  the controlled run — would need a convert-only GPU pass, adding a pass and a pool buffer where
+  there is currently none, and the identity test would have to become an explicit flag.
+- the warp shader would sample two planes and apply the YCbCr matrix carried on the buffer rather
+  than a hardcoded one, or colour shifts.
+
+So the saving is one AVFoundation conversion on every frame against a new blit on a tenth of them,
+and it is unmeasured in both directions.
 
 ### Hardware limits found
 
@@ -262,10 +282,11 @@ Two measured gaps closed with it: the FPS meters no longer latch when nothing is
 and the sink no longer publishes faster than the format the extension advertised. Both policies are
 pure and live in `AspectusKit` with 11 unit tests, so neither needs a camera to check.
 
-Closed at the end of the phase: the soak (97 minutes, negative memory trend) and the first host of
-the conferencing matrix (Zoom, with a controlled before/after in the extension log). Still open:
-the other five hosts, and the controlled latency run the three-way tracking discrepancy demands —
-that one needs a face in frame for its whole duration, so it cannot be run unattended.
+Closed at the end of the phase: the soak (97 minutes, negative memory trend), the first host of
+the conferencing matrix (Zoom, with a controlled before/after in the extension log), and the
+controlled latency run the tracking discrepancy demanded — that run was taken and is reported
+above, and it superseded the 19.2 ms figure rather than explaining it. Still open: the other five
+hosts.
 
 ## Known gaps
 
