@@ -13,7 +13,8 @@ struct Aspectus: App {
         WindowGroup("Aspectus") {
             ContentView(controller: controller, virtualCamera: virtualCamera, ui: ui)
         }
-        .windowResizability(.contentSize)
+        // wide enough for a 16:9 preview with the diagnostics inspector open
+        .defaultSize(width: 1100, height: 660)
         .commands { AspectusCommands(controller: controller, ui: ui) }
 
         Settings {

@@ -1,32 +1,40 @@
 import SwiftUI
 import AspectusKit
 
+/// the one piece of state that has to follow the pixels rather than the stats timer
+///
+/// kept off `PipelineController` so a per-frame publish does not re-render the toolbar, the status
+/// pill and thirty rows of diagnostics at capture rate, which is what AGENTS §7 forbids
+@MainActor
+final class TrackingOverlayModel: ObservableObject {
+    @Published var tracking: TrackingResult?
+    @Published var imageWidth = 0
+    @Published var imageHeight = 0
+}
+
 /// draws the tracked face box, eyes, and pupils over the preview for visual verification
 /// replicates the renderer's aspect-fill and mirror transform so geometry lines up with pixels
 struct TrackingOverlay: View {
-    @ObservedObject var controller: PipelineController
+    @ObservedObject var model: TrackingOverlayModel
+    let mirror: Bool
 
     var body: some View {
-        GeometryReader { geo in
-            Canvas { ctx, size in
-                guard controller.showOverlay,
-                      let tr = controller.tracking,
-                      controller.imageWidth > 0, controller.imageHeight > 0 else { return }
+        Canvas { ctx, size in
+            guard let tr = model.tracking, model.imageWidth > 0, model.imageHeight > 0 else { return }
 
-                let map = Mapper(viewSize: size,
-                                 imageW: Double(controller.imageWidth),
-                                 imageH: Double(controller.imageHeight),
-                                 mirror: controller.mirrorPreview)
+            let map = Mapper(viewSize: size,
+                             imageW: Double(model.imageWidth),
+                             imageH: Double(model.imageHeight),
+                             mirror: mirror)
 
-                stroke(rect: tr.faceBounds, in: &ctx, map: map,
-                       color: .green.opacity(0.7), width: 1.5)
-                stroke(rect: tr.leftEye.region, in: &ctx, map: map, color: .cyan, width: 1.5)
-                stroke(rect: tr.rightEye.region, in: &ctx, map: map, color: .cyan, width: 1.5)
-                dot(at: tr.leftEye.pupilCenter, in: &ctx, map: map)
-                dot(at: tr.rightEye.pupilCenter, in: &ctx, map: map)
-            }
-            .allowsHitTesting(false)
+            stroke(rect: tr.faceBounds, in: &ctx, map: map,
+                   color: .green.opacity(0.7), width: 1.5)
+            stroke(rect: tr.leftEye.region, in: &ctx, map: map, color: .cyan, width: 1.5)
+            stroke(rect: tr.rightEye.region, in: &ctx, map: map, color: .cyan, width: 1.5)
+            dot(at: tr.leftEye.pupilCenter, in: &ctx, map: map)
+            dot(at: tr.rightEye.pupilCenter, in: &ctx, map: map)
         }
+        .allowsHitTesting(false)
     }
 
     private func stroke(rect r: NormRect, in ctx: inout GraphicsContext,

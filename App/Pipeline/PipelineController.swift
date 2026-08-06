@@ -86,10 +86,11 @@ final class PipelineController: ObservableObject {
         case cancelled
     }
 
-    /// the only per-frame publish left: the overlay is a visual check on the landmarks themselves,
-    /// so it has to follow the pixels rather than a half-second timer. every numeric diagnostic
-    /// moved to refreshStats, which is what AGENTS §7 asks for
-    @Published var tracking: TrackingResult?
+    /// the overlay is a visual check on the landmarks themselves, so it has to follow the pixels
+    /// rather than a half-second timer; it has its own object so the per-frame publish reaches the
+    /// canvas and nothing else. every numeric diagnostic goes through refreshStats, per AGENTS §7
+    let overlay = TrackingOverlayModel()
+
     @Published var trackingMeanMs: Double = 0
     @Published var trackingP95Ms: Double = 0
     @Published var correctionMeanMs: Double = 0
@@ -100,8 +101,6 @@ final class PipelineController: ObservableObject {
     @Published var pipelineMeanMs: Double = 0
     @Published var pipelineP95Ms: Double = 0
     @Published var showOverlay = true { didSet { preferences.showOverlay = showOverlay } }
-    @Published var imageWidth: Int = 0
-    @Published var imageHeight: Int = 0
 
     @Published var mirrorPreview = true {
         didSet {
@@ -501,6 +500,13 @@ final class PipelineController: ObservableObject {
         captureInterruption = nil
         renderer?.flush()
         isRunning = false
+        // the stats timer is gone, so nothing would ever correct these: a stopped camera must not
+        // leave the panel reporting the rate it was running at
+        processMeter = RateMeter()
+        outputMeter = RateMeter()
+        captureFPS = 0
+        processFPS = 0
+        outputFPS = 0
     }
 
     /// the loop body runs off the main actor, hopping only to publish overlay state and to draw,
@@ -655,13 +661,17 @@ final class PipelineController: ObservableObject {
                 // before mirroring, which is a display choice and must not reach a host
                 virtualCamera.publish(corrected.pixelBuffer, timing: frame.header.timing)
 
-                let overlay = applied
+                let landmarks = applied
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.processMeter.tick(at: HostClock.seconds)
-                    self.tracking = overlay
-                    if self.imageWidth != frame.header.width { self.imageWidth = frame.header.width }
-                    if self.imageHeight != frame.header.height { self.imageHeight = frame.header.height }
+                    self.overlay.tracking = landmarks
+                    if self.overlay.imageWidth != frame.header.width {
+                        self.overlay.imageWidth = frame.header.width
+                    }
+                    if self.overlay.imageHeight != frame.header.height {
+                        self.overlay.imageHeight = frame.header.height
+                    }
                     if let renderer = self.renderer, let view = renderer.attachedView {
                         renderer.enqueue(corrected.pixelBuffer, timing: frame.header.timing, view: view)
                     }
