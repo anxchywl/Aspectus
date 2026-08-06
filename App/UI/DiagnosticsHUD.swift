@@ -35,7 +35,10 @@ struct DiagnosticsHUD: View {
 
     private var latency: some View {
         section("Latency  mean / p95") {
-            row("tracking", ms(controller.trackingMeanMs, controller.trackingP95Ms),
+            row("vision", ms(controller.visionMeanMs, controller.visionP95Ms),
+                warn: controller.visionP95Ms >= 16)
+            // the loop's critical path as seen from the tracking await, not Vision's own cost
+            row("track loop", ms(controller.trackingMeanMs, controller.trackingP95Ms),
                 warn: controller.trackingP95Ms >= 16)
             row("warp", ms(controller.correctionMeanMs, controller.correctionP95Ms),
                 warn: controller.correctionP95Ms >= 8)

@@ -9,10 +9,17 @@ struct VisionFaceTracker: FaceTracker {
 
     private let queue = DispatchQueue(label: "com.aspectus.vision", qos: .userInteractive)
 
+    /// what the two Vision passes actually cost, measured around the request and nothing else
+    ///
+    /// the orchestrator's "tracking" figure starts before this is dispatched and stops after the
+    /// warp, the publish and the main-actor hop, so it reports the loop's critical path instead
+    let metrics = StageMetrics(name: "vision", window: 240)
+
     func track(_ pixels: CVReadyFrame, header: FrameHeader) async -> TrackingResult? {
         await withCheckedContinuation { (cont: CheckedContinuation<TrackingResult?, Never>) in
             queue.async {
-                cont.resume(returning: Self.detect(pixels.pixelBuffer))
+                let result = metrics.measure { Self.detect(pixels.pixelBuffer) }
+                cont.resume(returning: result)
             }
         }
     }

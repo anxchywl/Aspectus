@@ -93,6 +93,9 @@ final class PipelineController: ObservableObject {
 
     @Published var trackingMeanMs: Double = 0
     @Published var trackingP95Ms: Double = 0
+    /// Vision's own cost, which the tracking figure above does not isolate
+    @Published var visionMeanMs: Double = 0
+    @Published var visionP95Ms: Double = 0
     @Published var correctionMeanMs: Double = 0
     @Published var correctionP95Ms: Double = 0
 
@@ -753,6 +756,10 @@ final class PipelineController: ObservableObject {
         trackingMeanMs = t.meanMs
         trackingP95Ms = t.p95Ms
 
+        let v = tracker.metrics.snapshot()
+        visionMeanMs = v.meanMs
+        visionP95Ms = v.p95Ms
+
         let c = correctionMetrics.snapshot()
         correctionMeanMs = c.meanMs
         correctionP95Ms = c.p95Ms
@@ -795,7 +802,8 @@ final class PipelineController: ObservableObject {
         activeCameraID = capture.activeDeviceID
 
         benchmark?.record(.init(captureFPS: captureFPS, processFPS: processFPS, outputFPS: outputFPS,
-                                tracking: t, correction: c, pipeline: pl, processing: p, endToEnd: e,
+                                tracking: t, vision: v, correction: c, pipeline: pl,
+                                processing: p, endToEnd: e,
                                 dropped: droppedFrames, depth: inFlight,
                                 memoryMB: memoryMB, thermal: thermalState, gaze: gaze,
                                 vcamState: virtualCameraState, vcamSent: virtualCameraSent,
