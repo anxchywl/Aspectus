@@ -161,7 +161,13 @@ final class SinkStreamSource: NSObject, CMIOExtensionStreamSource {
     private let clientLock = NSLock()
     private let consuming = OSAllocatedUnfairLock(initialState: false)
     private nonisolated(unsafe) var consumed: UInt64 = 0
+    /// consecutive failed consumes, so a run of them is logged once rather than once each
+    private nonisolated(unsafe) var consumeFailures: UInt64 = 0
     private let log = Logger(subsystem: "com.aspectus.app.cameraextension", category: "sink")
+
+    /// long enough that a stopped stream cannot be re-consumed at spin speed, short enough that a
+    /// client arriving late is picked up without a visible stall
+    private static let retryDelay = 0.1
 
     init(formats: [CMIOExtensionStreamFormat]) {
         self.formats = formats
@@ -212,9 +218,7 @@ final class SinkStreamSource: NSObject, CMIOExtensionStreamSource {
         // the client can arrive after the stream starts; returning without rescheduling used to
         // kill the loop permanently, so retry instead of giving up
         guard let client else {
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                self?.consumeNext()
-            }
+            retryConsume()
             return
         }
 
@@ -225,6 +229,12 @@ final class SinkStreamSource: NSObject, CMIOExtensionStreamSource {
                 let hostTime = UInt64(CMTimeGetSeconds(
                     CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000_000)
                 self.consumed &+= 1
+                if self.consumeFailures > 0 {
+                    self.log.notice("""
+                        consume recovered after \(self.consumeFailures, privacy: .public) failures
+                        """)
+                    self.consumeFailures = 0
+                }
                 if self.consumed % 300 == 1 {
                     self.log.debug("""
                         consumed \(self.consumed, privacy: .public) \
@@ -237,10 +247,27 @@ final class SinkStreamSource: NSObject, CMIOExtensionStreamSource {
                 self.stream?.notifyScheduledOutputChanged(
                     CMIOExtensionScheduledOutput(sequenceNumber: sequence, hostTimeInNanoseconds: hostTime))
             } else if let error {
-                self.log.error("consume failed: \(error.localizedDescription, privacy: .public)")
+                // consuming a stream the host has stopped fails immediately, so re-arming without
+                // a delay spins this loop at hundreds of thousands of iterations a second and
+                // writes a log line for every one of them — measured at 1.19 M lines in 1.9 s
+                self.consumeFailures &+= 1
+                if self.consumeFailures == 1 {
+                    self.log.error("""
+                        consume failed: \(error.localizedDescription, privacy: .public), \
+                        retrying every \(Self.retryDelay, privacy: .public)s
+                        """)
+                }
+                self.retryConsume()
+                return
             }
             // one outstanding request at a time keeps this process bounded by construction
             self.consumeNext()
+        }
+    }
+
+    private func retryConsume() {
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.retryDelay) { [weak self] in
+            self?.consumeNext()
         }
     }
 }
