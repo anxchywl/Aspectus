@@ -110,32 +110,52 @@ reassess model if quality/speed unacceptable], (4) Temporal quality, (5) Virtual
 
 ## Measured facts so far
 
-Release build, Apple M3 / macOS 26.6, FaceTime HD camera pinned to 1280×720. Latency figures are
-from a 136 s run with the preview window continuously visible (3,937 presented frames).
+Release build, Apple M3 / macOS 26.6, FaceTime HD camera pinned to 1280×720.
+
+**The controlled run**, which supersedes the earlier table: 174 s with the subject square to the
+camera (mean head yaw −0.5°), correction engaged on 90 % of samples, the preview continuously
+visible, and `caffeinate -d` holding the display awake — the last of those matters, because an
+earlier attempt let the display sleep and froze the present-dependent numbers.
 
 | Stage | mean | p95 |
 |---|---|---|
-| Face tracking (Vision rev 3) | 19.2 ms | 29.2 ms |
-| Eye warp (geometric, Metal) | 1.8 ms | 2.4 ms |
-| Ingest → present (processing) | 45.7 ms | 61.2 ms |
-| Capture → present (end-to-end) | 89.4 ms | 106.0 ms |
+| **Vision rev 3, both passes** | **6.12 ms** | **6.71 ms** |
+| Track loop (Vision + everything concurrent with it) | 6.44 ms | 8.80 ms |
+| Eye warp (geometric, Metal) | 0.80 ms | 1.32 ms |
+| **Ingest → corrected frame ready (pipeline)** | **0.75 ms** | **1.28 ms** |
+| Ingest → present (processing) | 25.9 ms | 32.0 ms |
+| Capture → present (end-to-end) | 54.0 ms | 60.1 ms |
+
+A second controlled run of 224 s agrees inside noise: Vision 6.34 / 7.07, track loop 6.74 / 8.89,
+warp 0.80 / 1.59, pipeline 0.84 / 1.60 ms.
+
+The superseded table, kept because two later sections still argue from it, was a 136 s run with the
+preview visible: face tracking 19.2 / 29.2, warp 1.8 / 2.4, processing 45.7 / 61.2, end-to-end
+89.4 / 106.0 ms.
 
 - Frames in flight never exceeded 1; 11 drops in 3,937 frames; thermal state nominal throughout.
-- **Unexplained, and not yet reconciled:** a later 15 s release run on the same machine and camera
-  recorded face tracking at **6.1 ms mean / 6.4 ms p95** — roughly a third of the figures above,
-  from an incidental run taken while verifying capture recovery rather than under benchmark
-  conditions. The table stands until a controlled run says otherwise, but the discrepancy is real
-  and worth chasing before any latency conclusion is drawn from either number.
-  - **A third run says the same thing.** The phase 6 occlusion check (39 s, 1,051 frames, same
-    machine and camera) recorded tracking at **6.2 ms mean / 6.5 ms p95**, with pupils and head
-    pose available on 100 % of frames — so the low figure is not explained by there being no face
-    to find. The same run read ingest → present at **28.3 / 30.2 ms** and end-to-end at
-    **56.4 / 58.1 ms**, against the table's 45.7 / 61.2 and 89.4 / 106.0.
-  - Two of three runs now sit on the low side, and the table is the outlier. It still stands,
-    because none of the low runs was taken under benchmark conditions — this one spent 14 s of its
-    39 with the window hidden, and correction ran on only 392 of 1,051 frames, the head-pose gate
-    being the dominant fallback. But the balance of evidence has moved, and the controlled run is
-    now the blocking item before any latency work rather than a nice-to-have.
+- ~~Unexplained: later runs recorded face tracking at ~6 ms against the table's 19.2 ms.~~
+  **Settled, and the table was wrong.** Two things were confused in it.
+  - **The metric was mislabelled.** What the table called "face tracking" starts its clock before
+    the Vision request is dispatched and stops it after the warp, the publish and the main-actor
+    hop have all finished, so it reports `max(Vision, everything concurrent with Vision)` — the
+    loop's critical path, not Vision's cost. Vision is now timed around the request itself and
+    reported separately; the two are listed above as *Vision* and *track loop*.
+  - **19.2 ms is not reproducible on this machine, by any build.** The obvious suspect was the
+    pre-redesign per-frame `tracking` publish, which re-rendered the whole HUD on the main actor at
+    capture rate and would have inflated a metric that includes the main-actor hop. That was tested
+    directly: the pre-redesign commit (18be6b9) was built from a worktree and run for 90 s with the
+    HUD visible, a face square to the camera and the preview presenting at 29.3 fps. It measured
+    **6.26 / 6.81 ms** — the same as the current build. The hypothesis is wrong and the build is not
+    the variable.
+  - What remains is that 19.2 / 29.2 ms belongs to a code or machine state that no longer exists,
+    and cannot be reproduced today. It is superseded rather than explained. The related note that
+    the second Vision pass cost "tracking mean 11.7 → 16.5 ms" comes from the same era and inherits
+    the same doubt.
+  - One asymmetry in the A/B, stated because it was not controlled: the new-build leg presented at
+    3.9 fps against the old leg's 29.3, its window having ended up behind another. It does not
+    affect the conclusion — the figure of interest sat at ~6.3 ms in both legs, and the display path
+    is not in Vision's measurement — but the two legs were not matched on that axis.
 - Resident memory over a separate 801 s run trended **down** (150 → 115 MB), so no leak is visible
   at that timescale.
 - **The soak criterion passes.** An unattended run of the phase 6 release build recorded 5,859 s of
@@ -160,13 +180,22 @@ from a 136 s run with the preview window continuously visible (3,937 presented f
   the capture recovery policy for disconnect, runtime errors and sleep/wake, rate-meter decay
   under a stall, and the pacer that holds publication to the advertised frame rate.
 
-### Phase 3 gate: not passed
+### Phase 3 gate: passed on the budget we own, missed on the one we do not
 
-The <20 ms processing target **fails at 61 ms p95**. The cause is measured and is *not* the
-correction: the geometric warp costs 2.4 ms p95, while Vision landmark detection costs 29.2 ms and
-the rest is display-path latency behind it. The model is therefore not the thing to reassess.
-Queued: decouple tracking from the display path, downscale the tracker input, and consume the
-camera's native YUV instead of converting to BGRA per frame.
+The original reading of this gate was wrong in its diagnosis, though not in its verdict. It blamed
+61 ms p95 processing on Vision at 29.2 ms; the controlled run puts Vision at **6.7 ms p95**, and
+that 29.2 ms figure is not reproducible by any build (see the settled note above).
+
+Measured under control, the stage this project actually owns — **ingest to corrected frame ready —
+costs 0.75 ms mean / 1.28 ms p95**, against a 20 ms budget. Vision is 6.7 ms p95 and the warp
+1.3 ms, both of which fit inside that budget with room to spare. There is nothing here that
+justifies reassessing the correction model on speed grounds; that question is closed.
+
+What still misses is **ingest → present at 32.0 ms p95**, down from the 61.2 ms originally
+recorded but still above 20 ms, and every millisecond of the gap is display-path latency after the
+frame is finished — compositor and drawable scheduling, which the virtual camera does not pay.
+Queued, and still worth doing: downscale the tracker input, and consume the camera's native YUV
+instead of converting to BGRA per frame.
 
 ### Hardware limits found
 

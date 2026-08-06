@@ -82,22 +82,27 @@ cameras. Full build, signing and release detail: [docs/INFRASTRUCTURE.md](./docs
 
 ## Performance
 
-Release build, Apple M3 / macOS 26.6, FaceTime HD at 1280×720, over 3,937 frames:
+Release build, Apple M3 / macOS 26.6, FaceTime HD at 1280×720. A 174 s controlled run: subject
+square to the camera, correction engaged on 90 % of samples, preview visible, display held awake.
 
 | Stage | mean | p95 |
 |---|---|---|
-| Face tracking (Vision) | 19.2 ms | 29.2 ms |
-| Eye warp (Metal) | 1.8 ms | 2.4 ms |
-| Ingest → present | 45.7 ms | 61.2 ms |
-| Capture → present | 89.4 ms | 106.0 ms |
+| Vision (face, eyes, pupils, head pose) | 6.1 ms | 6.7 ms |
+| Eye warp (Metal) | 0.8 ms | 1.3 ms |
+| **Ingest → corrected frame ready** | **0.75 ms** | **1.3 ms** |
+| Ingest → present | 25.9 ms | 32.0 ms |
+| Capture → present | 54.0 ms | 60.1 ms |
 
-Frames in flight never exceeded 1, with 11 drops in 3,937 frames. A separate **97-minute soak**
-published 136,479 frames to the virtual camera, dropped 63 (0.036 %), survived three sleep/wake
-cycles — 1.8–2.0 s from wake to frames each time — and ended with resident memory *lower* than it
-started. **Two targets are missed:** processing latency is 3× over its 20 ms budget — tracking, not
-correction, accounts for it — and 60 FPS is unreachable because this camera caps at 30 at every
-format it offers. The tracking figure above is also disputed by two later runs at ~6 ms; all of it
-is analysed in [docs/DESIGN.md](./docs/DESIGN.md).
+Frames in flight never exceeded 1. A separate **97-minute soak** published 136,479 frames to the
+virtual camera, dropped 63 (0.036 %), survived three sleep/wake cycles — 1.8–2.0 s from wake to
+frames each time — and ended with resident memory *lower* than it started.
+
+**The correction pipeline fits its budget with room to spare:** ingest to corrected frame is 1.3 ms
+p95 against 20 ms. What misses is **ingest → present at 32 ms p95**, and the gap is display-path
+latency after the frame is already finished — cost the virtual camera does not pay. 60 FPS is
+unreachable because this camera caps at 30 at every format it offers. An earlier table here quoted
+19.2 ms for tracking; that number was a mislabelled metric and is not reproducible by any build —
+the whole reconciliation is in [docs/DESIGN.md](./docs/DESIGN.md).
 
 Every number here comes from the app's own CSV recorder in a release build, never an estimate.
 
