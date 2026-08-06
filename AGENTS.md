@@ -38,7 +38,7 @@ App/                          the macOS app target (binds the core to Apple fram
   Capture/                    AVCaptureSession → drop-stale box; device, session and sleep observers
   Render/                     MetalRenderer + Shaders.metal (zero-copy CVPixelBuffer → texture)
   Pipeline/                   CVReadyFrame payload, VisionFaceTracker, correctors, PipelineController
-  UI/                         SwiftUI preview, overlay, HUD, calibration, settings, commands
+  UI/                         SwiftUI preview, tracking overlay, diagnostics, calibration, settings
   VirtualCamera/              system-extension installer, sink that publishes corrected frames
 
 CameraExtension/              the CoreMediaIO system extension, its own process
@@ -139,9 +139,9 @@ Wait for approval on large changes before writing code.
 
 ## 7. Diagnostics Rules
 
-- The HUD shows capture/process/output FPS, per-stage and end-to-end latency, dropped frames, queue depth, memory, thermal state, camera format, capture session state, virtual-camera state, and the gaze diagnostics that say why a frame was or was not corrected.
+- The HUD — the diagnostics panel in the window's inspector — shows capture/process/output FPS, per-stage and end-to-end latency, dropped frames, queue depth, memory, thermal state, camera format, capture session state, virtual-camera state, and the gaze diagnostics that say why a frame was or was not corrected.
 - Name the active corrector and its version in the HUD. Once a Core ML model is in the path, its version and configured compute units go there too — those choices must be visible, not hidden.
-- Update diagnostics on a timer, not per frame — never thrash the main actor at capture rate. The tracking overlay is the one exception, because it has to follow the pixels.
+- Update diagnostics on a timer, not per frame — never thrash the main actor at capture rate. The tracking overlay is the one exception, because it has to follow the pixels; it gets its own observable object so its per-frame publish cannot re-render anything else.
 - Log the rare paths — recovery transitions, extension reconnects — to the unified log. Nobody is watching the HUD when they fire.
 
 ## 8. Git & Commit Rules

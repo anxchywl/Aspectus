@@ -90,9 +90,9 @@ construction, newest-frame-wins, drops counted. Zero-copy path: `CVPixelBuffer`�
    matrix (Zoom/Meet/Teams/Discord/Slack/OBS); handle camera + host disconnect/reacquire.
    **Partly retired.** Signing, notarization and activation work, and the extension being replaced
    under a running app is handled: the app rebuilds a connection whose queue has stopped draining,
-   rather than believing forever that it is still connected. The host matrix remains untested, so
-   host-app quirks are still an open risk — and the one host quirk found so far was in the test
-   client, not in any host.
+   rather than believing forever that it is still connected. **Zoom is verified**; the other five
+   hosts are untested, so host-app quirks remain an open risk. The one bug the Zoom test did find
+   was ours, not the host's: a stopped sink stream spun the extension's consume loop.
 
 ## 6. Implementation phases
 Matches the brief: (1) Video foundation, (2) Tracking, (3) Correction prototype [**hard gate**:
@@ -137,7 +137,22 @@ from a 136 s run with the preview window continuously visible (3,937 presented f
     being the dominant fallback. But the balance of evidence has moved, and the controlled run is
     now the blocking item before any latency work rather than a nice-to-have.
 - Resident memory over a separate 801 s run trended **down** (150 → 115 MB), so no leak is visible
-  at that timescale. The full 30-minute soak is still outstanding.
+  at that timescale.
+- **The soak criterion passes.** An unattended run of the phase 6 release build recorded 5,859 s of
+  awake time — 97.6 minutes — across 10.5 hours of wall clock. Resident memory trended
+  **−0.79 MB/min** (264 MB peak at startup, 81 MB at the end); the criterion is no monotonic growth
+  and the trend is negative. Taking only the **34.6 minutes of continuous streaming** before the
+  machine first slept, which is the criterion read literally: memory min 106 / mean 132 / max 264 MB,
+  trend **−1.83 MB/min**. 63 dropped frames over ~175,000 captured (0.036 %), and the virtual camera
+  published 136,479 frames with 0 paced and 0 failed. Thermal state was nominal for 11,695 of 11,713
+  samples; the only excursion was a nine-second nominal → fair → serious → critical → nominal
+  sequence at the exact moment the machine went to sleep, not under our load.
+  - The same run exercised **sleep/wake three times, unplanned**, including one 7 h 42 m sleep.
+    Every cycle recovered: `didWake → retrying(attempt: 1)` → reopen 0.5 s later → frames confirmed
+    at **1.83 s, 1.95 s and 1.85 s** from wake. That matches the single 1.8 s measurement taken
+    earlier and turns it from one observation into four.
+  - Note that elapsed time in the CSV is *awake* time: `HostClock` does not advance while the
+    machine sleeps, which is why 10.5 hours of wall clock produced 98 minutes of samples.
 - 181 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
   and reopen, 1€ jitter reduction and bounded-lag tracking, gate hysteresis / angle-limit fallback
   / slew ramp, blink preservation, filter reset on tracking loss and timestamp discontinuity,
@@ -199,12 +214,29 @@ The pipeline moved up to the app so the settings window and the menu commands ac
 instance the preview shows, and **New Window** was removed with it: a second window used to bring
 up a second controller, and with it a second capture session on the same camera.
 
+The window itself was then rebuilt around the picture rather than around the telemetry. The
+diagnostics moved off the video into the window's inspector, so all thirty-odd rows stay one
+keystroke away without covering the thing they describe; a status pill says in words what the
+pipeline is doing — correcting, passing through, looking for a face, head turned too far — instead
+of leaving that to be inferred from a blend percentage; and dead states use `ContentUnavailableView`
+with the action that fixes them. One behavioural correction came with it: a virtual camera that
+would not install used to cover the preview with an error, which contradicted the invariant that
+the virtual camera is an output and never a dependency. It is a non-blocking notice now.
+
+Moving the diagnostics also fixed a cost that had been there since phase 1. `tracking` was
+published from the controller on every frame, so *every* view observing the controller — toolbar,
+overlay, HUD — re-evaluated at capture rate, which is exactly what AGENTS §7 forbids. The overlay
+now has its own small observable object, and the rest of the UI redraws on the half-second stats
+tick.
+
 Two measured gaps closed with it: the FPS meters no longer latch when nothing is being presented,
 and the sink no longer publishes faster than the format the extension advertised. Both policies are
 pure and live in `AspectusKit` with 11 unit tests, so neither needs a camera to check.
 
-Still open at the end of the phase: the 30-minute soak, the six-host conferencing matrix, and the
-controlled latency run the three-way tracking discrepancy now demands.
+Closed at the end of the phase: the soak (97 minutes, negative memory trend) and the first host of
+the conferencing matrix (Zoom, with a controlled before/after in the extension log). Still open:
+the other five hosts, and the controlled latency run the three-way tracking discrepancy demands —
+that one needs a face in frame for its whole duration, so it cannot be run unattended.
 
 ## Known gaps
 
@@ -321,7 +353,22 @@ controlled latency run the three-way tracking discrepancy now demands.
   with **0 paced and 0 dropped**, which is the parity case and no evidence about the 60 FPS path.
   Resolution cannot drift the same way: it is one constant compiled into both targets, pinned in
   the capture output, and checked against real buffers before publishing.
-- The virtual camera has never been soak-tested. One session recorded resident memory at 433 MB
-  against a ~110 MB baseline, after the stats recorder had already stopped writing for reasons
-  that were never established. Neither observation is diagnosed, and neither should be quoted as
-  a result until a clean sustained run exists.
+- ~~The virtual camera has never been soak-tested. One session recorded resident memory at 433 MB
+  against a ~110 MB baseline, after the stats recorder had already stopped writing.~~ **Superseded
+  by the 97-minute soak above**, which published 136,479 frames and ended at 81 MB with a negative
+  memory trend. The earlier 433 MB reading is still unexplained, but it is no longer the only
+  sustained observation, and nothing like it reappeared.
+- ~~The host matrix is untested — the virtual camera has never been tried in a conferencing app.~~
+  **One host of six is now verified: Zoom.** Aspectus appears in Zoom's camera list beside the
+  physical ones, and selecting it produced a live picture in Zoom's video preview. The control the
+  last host test lacked is present this time, from the extension's own log rather than from the
+  host's UI: `forwarding=false` before selection, `forwarding=true` with the source counter
+  climbing ~30 buffers/s while selected, and `forwarding=false` again the moment the camera was set
+  back to FaceTime HD. Meet, Teams, Discord, Slack and OBS remain untested.
+- **A host disconnecting used to spin the extension.** Found by that same test: when the sink
+  stream stops, `consumeSampleBuffer` fails immediately, and the completion handler re-armed with
+  no delay — measured at **1,189,895 log lines in 1.877 s**, roughly 634,000 failed consumes per
+  second, burning a core inside a system extension and flooding the unified log. Fixed: a failed
+  consume now retries on the same 0.1 s timer the late-client path already used, and a run of
+  failures logs once rather than once each, with a recovery line when it clears. The loop still
+  keeps exactly one request outstanding.

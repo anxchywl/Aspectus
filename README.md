@@ -11,10 +11,10 @@ Native macOS, Apple Silicon only. Swift, SwiftUI, AVFoundation, Metal, Apple Vis
 CoreMediaIO camera extension. No Electron, no Python runtime.
 
 > [!WARNING]
-> **In development.** The pipeline runs end to end and the virtual camera delivers frames to a
-> capture client, but it has never been tried in an actual conferencing app. There are no releases
-> yet, and building it yourself needs an Apple Developer ID — macOS will not activate an unsigned
-> camera extension. See [Status](#status).
+> **In development.** The pipeline runs end to end and the virtual camera works in Zoom, but the
+> other five host apps are untested and correction quality is a geometric baseline, not the target.
+> There are no releases yet, and building it yourself needs an Apple Developer ID — macOS will not
+> activate an unsigned camera extension. See [Status](#status).
 
 ## What it does
 
@@ -91,10 +91,13 @@ Release build, Apple M3 / macOS 26.6, FaceTime HD at 1280×720, over 3,937 frame
 | Ingest → present | 45.7 ms | 61.2 ms |
 | Capture → present | 89.4 ms | 106.0 ms |
 
-Frames in flight never exceeded 1, with 11 drops in 3,937 frames and memory flat over a 13-minute
-run. **Two targets are missed:** processing latency is 3× over its 20 ms budget — tracking, not
+Frames in flight never exceeded 1, with 11 drops in 3,937 frames. A separate **97-minute soak**
+published 136,479 frames to the virtual camera, dropped 63 (0.036 %), survived three sleep/wake
+cycles — 1.8–2.0 s from wake to frames each time — and ended with resident memory *lower* than it
+started. **Two targets are missed:** processing latency is 3× over its 20 ms budget — tracking, not
 correction, accounts for it — and 60 FPS is unreachable because this camera caps at 30 at every
-format it offers. Both are analysed in [docs/DESIGN.md](./docs/DESIGN.md).
+format it offers. The tracking figure above is also disputed by two later runs at ~6 ms; all of it
+is analysed in [docs/DESIGN.md](./docs/DESIGN.md).
 
 Every number here comes from the app's own CSV recorder in a release build, never an estimate.
 
@@ -107,8 +110,8 @@ Every number here comes from the app's own CSV recorder in a release build, neve
 | 3 — Geometric eye warp in Metal | ✅ working, over the latency budget |
 | 3b — Learned warp field (Core ML) | ⬜ blocked — no licence-clean weights |
 | 4 — Temporal quality: filters, gate, slew | ✅ wired and tested |
-| 5 — Virtual camera (CoreMediaIO) | ✅ delivers frames; untested in conferencing apps |
-| 6 — UI and hardening | 🔄 settings, saved preferences, camera picker, menus; soak still outstanding |
+| 5 — Virtual camera (CoreMediaIO) | ✅ verified in Zoom; five other hosts untested |
+| 6 — UI and hardening | ✅ settings, saved preferences, menus, inspector; 97-min soak passed |
 
 Known gaps and everything not yet measured on hardware are listed at the end of
 [docs/DESIGN.md](./docs/DESIGN.md).
