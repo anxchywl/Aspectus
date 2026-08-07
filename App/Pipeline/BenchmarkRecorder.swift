@@ -40,6 +40,7 @@ final class BenchmarkRecorder {
         presented,dropped,depth,memory_mb,thermal,\
         pupil_src_l,pupil_src_r,pupil_pts_l,pupil_pts_r,vision_pupil_share,head_pose_share,\
         off_x_l,off_y_l,off_x_r,off_y_r,off_y_mean,off_y_min,off_y_max,\
+        reg_cy_l,reg_h_l,pup_y_l,corner_y_l,reg_cy_r,reg_h_r,pup_y_r,corner_y_r,\
         open_l,open_r,head_yaw_deg,head_pitch_deg,head_roll_deg,\
         raw_yaw_deg,raw_pitch_deg,req_yaw_deg,req_pitch_deg,req_mag_deg,\
         angle_factor,blend,iris_px,age_mean_ms,age_p95_ms,\
@@ -96,6 +97,10 @@ final class BenchmarkRecorder {
             fine(s?.right?.pupilOffset.x ?? 0), fine(s?.right?.pupilOffset.y ?? 0),
             fine(g.verticalPupilOffset.mean), fine(g.verticalPupilOffset.minimum),
             fine(g.verticalPupilOffset.maximum),
+            fine(s?.left?.region.center.y ?? 0), fine(s?.left?.region.height ?? 0),
+            fine(s?.left?.pupil.y ?? 0), fine(s?.left?.cornerMidpointY ?? 0),
+            fine(s?.right?.region.center.y ?? 0), fine(s?.right?.region.height ?? 0),
+            fine(s?.right?.pupil.y ?? 0), fine(s?.right?.cornerMidpointY ?? 0),
             fmt(s?.left?.openness ?? 0), fmt(s?.right?.openness ?? 0),
             fmt(s?.headYawDegrees ?? 0), fmt(s?.headPitchDegrees ?? 0), fmt(s?.headRollDegrees ?? 0),
             fmt(s?.rawYawDegrees ?? 0), fmt(s?.rawPitchDegrees ?? 0),

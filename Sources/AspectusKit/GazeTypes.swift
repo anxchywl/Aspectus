@@ -35,20 +35,29 @@ public enum PupilSource: String, Sendable, Equatable, CaseIterable {
 public struct EyeObservation: Sendable {
     public var region: NormRect          // tight bbox of the eye opening
     public var pupilCenter: NormPoint    // detected pupil / iris center
+    public var cornerMidpointY: Double?
     public var openness: Double          // 0 closed (blink), 1 fully open
     public var pupilSource: PupilSource
     public var pupilPointCount: Int      // landmark points behind pupilCenter, 0 for a fallback
     public init(region: NormRect, pupilCenter: NormPoint, openness: Double,
-                pupilSource: PupilSource = .none, pupilPointCount: Int = 0) {
+                pupilSource: PupilSource = .none, pupilPointCount: Int = 0,
+                cornerMidpointY: Double? = nil) {
         self.region = region; self.pupilCenter = pupilCenter; self.openness = openness
         self.pupilSource = pupilSource; self.pupilPointCount = pupilPointCount
+        self.cornerMidpointY = cornerMidpointY
     }
 
-    /// pupil displacement from the aperture centre, the quantity the whole gaze estimate rests on
-    /// and the one carrying the eyelid bias, so it is worth reading directly rather than inferring
+    public static func cornerMidpointY(of contour: [NormPoint]) -> Double? {
+        guard let left = contour.min(by: { $0.x < $1.x }),
+              let right = contour.max(by: { $0.x < $1.x }) else { return nil }
+        return (left.y + right.y) / 2
+    }
+
+    /// pupil displacement from the horizontal aperture centre and vertical corner line
     public var pupilOffset: NormPoint {
         let c = region.center
-        return NormPoint(x: pupilCenter.x - c.x, y: pupilCenter.y - c.y)
+        return NormPoint(x: pupilCenter.x - c.x,
+                         y: pupilCenter.y - (cornerMidpointY ?? c.y))
     }
 }
 

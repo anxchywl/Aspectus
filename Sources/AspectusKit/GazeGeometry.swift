@@ -61,11 +61,10 @@ public struct EyeWarp: Sendable, Equatable {
 /// displacement is derived purely from observed image geometry, so it cannot be inverted by a
 /// disagreement with Vision's or the camera's handedness
 public enum GazeGeometry {
-    /// pupil offset from the aperture centre, in units of eye widths
+    /// pupil offset from the horizontal aperture centre and vertical corner line
     private static func pupilOffset(_ eye: EyeObservation) -> (x: Double, y: Double)? {
         guard eye.region.width > 1e-6, eye.region.height > 1e-6 else { return nil }
-        let c = eye.region.center
-        return (eye.pupilCenter.x - c.x, eye.pupilCenter.y - c.y)
+        return (eye.pupilOffset.x, eye.pupilOffset.y)
     }
 
     /// one eye's gaze angles in radians, nil when that eye alone cannot be trusted

@@ -27,11 +27,17 @@ private func tracking(left: EyeObservation, right: EyeObservation,
 }
 
 final class PupilOffsetTests: XCTestCase {
-    func testOffsetIsMeasuredFromTheApertureCentre() {
+    func testOffsetFallsBackToTheApertureCentreWithoutCorners() {
         let e = eye(pupilDX: 0.007, pupilDY: -0.003)
         XCTAssertEqual(e.pupilOffset.x, 0.007, accuracy: 1e-12)
-        XCTAssertEqual(e.pupilOffset.y, -0.003, accuracy: 1e-12,
-                       "the vertical offset is the eyelid-bias term the estimate rests on")
+        XCTAssertEqual(e.pupilOffset.y, -0.003, accuracy: 1e-12)
+    }
+
+    func testVerticalOffsetUsesTheCornerLineWhileHorizontalUsesTheApertureCentre() {
+        var e = eye(pupilDX: 0.007, pupilDY: -0.003)
+        e.cornerMidpointY = e.region.center.y - 0.001
+        XCTAssertEqual(e.pupilOffset.x, 0.007, accuracy: 1e-12)
+        XCTAssertEqual(e.pupilOffset.y, -0.002, accuracy: 1e-12)
     }
 
     func testSmoothingPreservesThePupilSource() {
@@ -41,6 +47,23 @@ final class PupilOffsetTests: XCTestCase {
         XCTAssertEqual(filtered.leftEye.pupilSource, .contourCentroid,
                        "filtering geometry must not erase where the pupil came from")
         XCTAssertEqual(filtered.leftEye.pupilPointCount, 0)
+    }
+
+    func testCornerMidpointUsesTheHorizontalExtremes() {
+        let contour = [NormPoint(x: 0.40, y: 0.44),
+                       NormPoint(x: 0.42, y: 0.39),
+                       NormPoint(x: 0.46, y: 0.42),
+                       NormPoint(x: 0.43, y: 0.47)]
+        let midpoint = EyeObservation.cornerMidpointY(of: contour)
+        XCTAssertEqual(midpoint ?? 0, 0.43, accuracy: 1e-12)
+    }
+
+    func testCornerRelativePupilPositionIgnoresWholeEyeTranslation() {
+        let contour = [NormPoint(x: 0.40, y: 0.44), NormPoint(x: 0.46, y: 0.42)]
+        let translated = contour.map { NormPoint(x: $0.x + 0.1, y: $0.y + 0.2) }
+        let anchor = EyeObservation.cornerMidpointY(of: contour)!
+        let translatedAnchor = EyeObservation.cornerMidpointY(of: translated)!
+        XCTAssertEqual(0.41 - anchor, 0.61 - translatedAnchor, accuracy: 1e-12)
     }
 }
 

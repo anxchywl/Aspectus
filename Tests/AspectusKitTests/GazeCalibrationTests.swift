@@ -79,6 +79,12 @@ final class GazeCalibrationModelTests: XCTestCase {
         XCTAssertFalse(c.isUsable, "a file from a newer build must be ignored, not guessed at")
     }
 
+    func testApertureRelativeCalibrationIsRejected() {
+        let c = GazeCalibration(version: 1, yawOffsetDegrees: 0, pitchOffsetDegrees: 0)
+        XCTAssertFalse(c.isUsable,
+                       "version 1 was fitted against the incompatible eyelid-centre vertical signal")
+    }
+
     func testImplausibleOffsetIsRejected() {
         XCTAssertFalse(GazeCalibration(yawOffsetDegrees: 0, pitchOffsetDegrees: 45).isUsable)
         XCTAssertFalse(GazeCalibration(yawOffsetDegrees: .nan, pitchOffsetDegrees: 0).isUsable)
@@ -250,6 +256,47 @@ final class CalibrationSessionTests: XCTestCase {
         XCTAssertGreaterThan(means?.pitchDegrees ?? 0, 0,
                              "a pupil above the aperture centre reads as looking up")
         XCTAssertNil(s.means(for: .right), "a target with no samples has no reading")
+    }
+
+    func testSamplesCarryThePupilOffsetTheAnglesCameFrom() {
+        var s = CalibrationSession(config: config(3))
+        _ = feed(&s, frames: 3, dy: -0.002)
+        let recorded = s.samples.first
+        XCTAssertEqual(recorded?.leftOffsetY ?? 0, -0.002, accuracy: 1e-9)
+        XCTAssertEqual(recorded?.rightOffsetY ?? 0, -0.002, accuracy: 1e-9)
+        XCTAssertEqual(s.means(for: .center)?.offsetY ?? 0, -0.002, accuracy: 1e-9,
+                       "the per-target mean is what makes eye travel comparable across runs")
+    }
+
+    func testRecordedOffsetIsIndependentOfEyeWidth() {
+        func offsetY(width: Double) -> Double {
+            var s = CalibrationSession(config: config(3))
+            var t = 3.0
+            for _ in 0..<3 {
+                let e = eye(pupilDY: -0.002, width: width)
+                let r = TrackingResult(faceBounds: NormRect(x: 0.3, y: 0.2, width: 0.4, height: 0.5),
+                                       leftEye: e, rightEye: e,
+                                       headPose: HeadPose(yaw: 0, pitch: 0, roll: 0),
+                                       confidence: 1.0)
+                _ = s.offer(r, imageAspect: aspect, t: t)
+                t += 1.0 / 30.0
+            }
+            return s.means(for: .center)?.offsetY ?? 0
+        }
+        XCTAssertEqual(offsetY(width: 0.06), offsetY(width: 0.03), accuracy: 1e-9)
+    }
+
+    func testCalibrationSampleDecodesFilesWrittenBeforeTheOffsetFields() throws {
+        let legacy = """
+        {"target":"center","yawDegrees":1,"pitchDegrees":2,"leftYawDegrees":1,\
+        "leftPitchDegrees":2,"rightYawDegrees":1,"rightPitchDegrees":2,"headYawDegrees":0,\
+        "headPitchDegrees":0,"headRollDegrees":0,"confidence":0.9}
+        """
+        let decoded = try JSONDecoder().decode(CalibrationSample.self,
+                                               from: Data(legacy.utf8))
+        XCTAssertEqual(decoded.yawDegrees, 1)
+        XCTAssertEqual(decoded.offsetX, 0, "a missing offset reads as zero rather than failing")
+        XCTAssertEqual(decoded.offsetY, 0)
     }
 
     /// drives the five fixation targets and stops at the head-motion sweep
@@ -698,8 +745,8 @@ final class HeadCouplingTests: XCTestCase {
         XCTAssertEqual(decoded.headCoupling, original.headCoupling)
     }
 
-    // a calibration written before this feature existed must still load and simply not compensate
-    func testOlderFileWithoutCouplingStillDecodes() throws {
+    // an older file must still decode so its incompatibility is handled as a version decision
+    func testOlderFileWithoutCouplingDecodesButIsNotUsable() throws {
         let json = """
         {"version":1,"yawOffsetDegrees":0.68,"pitchOffsetDegrees":5.38,"yawGain":1,"pitchGain":1,
          "verticalSeparationDegrees":9.7,"horizontalSeparationDegrees":61.8,"sampleCount":300,
@@ -709,6 +756,6 @@ final class HeadCouplingTests: XCTestCase {
         decoder.dateDecodingStrategy = .iso8601
         let decoded = try decoder.decode(GazeCalibration.self, from: Data(json.utf8))
         XCTAssertNil(decoded.headCoupling)
-        XCTAssertTrue(decoded.isUsable)
+        XCTAssertFalse(decoded.isUsable)
     }
 }

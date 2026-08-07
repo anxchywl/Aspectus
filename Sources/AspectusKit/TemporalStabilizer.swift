@@ -44,10 +44,13 @@ public struct TemporalStabilizer: Sendable {
     private struct EyeFilter: Sendable {
         var region: RectFilter
         var pupil: OneEuroPointFilter
+        var cornerMidpointY: OneEuroFilter
 
         init(_ t: OneEuroTuning) {
             region = RectFilter(t)
             pupil = OneEuroPointFilter(minCutoff: t.minCutoff, beta: t.beta, dCutoff: t.dCutoff)
+            cornerMidpointY = OneEuroFilter(minCutoff: t.minCutoff, beta: t.beta,
+                                            dCutoff: t.dCutoff)
         }
 
         mutating func filter(_ e: EyeObservation, t: Double) -> EyeObservation {
@@ -56,10 +59,13 @@ public struct TemporalStabilizer: Sendable {
                                   pupilCenter: NormPoint(x: p.x, y: p.y),
                                   openness: e.openness,
                                   pupilSource: e.pupilSource,
-                                  pupilPointCount: e.pupilPointCount)
+                                  pupilPointCount: e.pupilPointCount,
+                                  cornerMidpointY: e.cornerMidpointY.map {
+                                      cornerMidpointY.filter($0, t: t)
+                                  })
         }
 
-        mutating func reset() { region.reset(); pupil.reset() }
+        mutating func reset() { region.reset(); pupil.reset(); cornerMidpointY.reset() }
     }
 
     public private(set) var config: Config

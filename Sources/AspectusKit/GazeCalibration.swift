@@ -26,13 +26,24 @@ public struct CalibrationSample: Codable, Sendable, Equatable {
     public var headPitchDegrees: Double
     public var headRollDegrees: Double
     public var confidence: Double
+    /// raw pupil displacement behind each angle, retained to diagnose suspicious fits
+    public var leftOffsetX: Double
+    public var leftOffsetY: Double
+    public var rightOffsetX: Double
+    public var rightOffsetY: Double
 
     public init(target: CalibrationTarget,
                 yawDegrees: Double, pitchDegrees: Double,
                 leftYawDegrees: Double, leftPitchDegrees: Double,
                 rightYawDegrees: Double, rightPitchDegrees: Double,
                 headYawDegrees: Double, headPitchDegrees: Double, headRollDegrees: Double,
-                confidence: Double) {
+                confidence: Double,
+                leftOffsetX: Double = 0, leftOffsetY: Double = 0,
+                rightOffsetX: Double = 0, rightOffsetY: Double = 0) {
+        self.leftOffsetX = leftOffsetX
+        self.leftOffsetY = leftOffsetY
+        self.rightOffsetX = rightOffsetX
+        self.rightOffsetY = rightOffsetY
         self.target = target
         self.yawDegrees = yawDegrees
         self.pitchDegrees = pitchDegrees
@@ -45,6 +56,30 @@ public struct CalibrationSample: Codable, Sendable, Equatable {
         self.headRollDegrees = headRollDegrees
         self.confidence = confidence
     }
+
+    /// preserves decoding for samples written before raw offsets were stored
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        target = try c.decode(CalibrationTarget.self, forKey: .target)
+        yawDegrees = try c.decode(Double.self, forKey: .yawDegrees)
+        pitchDegrees = try c.decode(Double.self, forKey: .pitchDegrees)
+        leftYawDegrees = try c.decode(Double.self, forKey: .leftYawDegrees)
+        leftPitchDegrees = try c.decode(Double.self, forKey: .leftPitchDegrees)
+        rightYawDegrees = try c.decode(Double.self, forKey: .rightYawDegrees)
+        rightPitchDegrees = try c.decode(Double.self, forKey: .rightPitchDegrees)
+        headYawDegrees = try c.decode(Double.self, forKey: .headYawDegrees)
+        headPitchDegrees = try c.decode(Double.self, forKey: .headPitchDegrees)
+        headRollDegrees = try c.decode(Double.self, forKey: .headRollDegrees)
+        confidence = try c.decode(Double.self, forKey: .confidence)
+        leftOffsetX = try c.decodeIfPresent(Double.self, forKey: .leftOffsetX) ?? 0
+        leftOffsetY = try c.decodeIfPresent(Double.self, forKey: .leftOffsetY) ?? 0
+        rightOffsetX = try c.decodeIfPresent(Double.self, forKey: .rightOffsetX) ?? 0
+        rightOffsetY = try c.decodeIfPresent(Double.self, forKey: .rightOffsetY) ?? 0
+    }
+
+    /// mean of the two eyes, which is the quantity `GazeGeometry.estimate` effectively averages
+    public var offsetX: Double { (leftOffsetX + rightOffsetX) / 2 }
+    public var offsetY: Double { (leftOffsetY + rightOffsetY) / 2 }
 }
 
 /// per-axis affine map from raw geometric gaze to calibrated gaze
@@ -53,7 +88,7 @@ public struct CalibrationSample: Codable, Sendable, Equatable {
 /// definition. gain needs the true angle of the off-axis targets, which needs display geometry and
 /// a viewing distance, so it is fitted only when that geometry is supplied and pinned to 1 otherwise
 public struct GazeCalibration: Codable, Sendable, Equatable {
-    public static let currentVersion = 1
+    public static let currentVersion = 2
 
     public var version: Int
     public var yawOffsetDegrees: Double

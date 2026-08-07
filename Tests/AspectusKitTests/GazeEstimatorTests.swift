@@ -57,6 +57,38 @@ final class GazeSignConventionTests: XCTestCase {
         XCTAssertLessThan(GazeGeometry.estimate(face(dy: 0.003), imageAspect: aspect)!.pitch, 0)
     }
 
+    func testVerticalEstimateUsesTheEyeCornerLine() {
+        let region = NormRect(x: 0.4, y: 0.4, width: 0.06, height: 0.02)
+        let pupil = NormPoint(x: region.center.x, y: region.center.y - 0.003)
+        let first = EyeObservation(region: region, pupilCenter: pupil, openness: 1,
+                                   cornerMidpointY: region.center.y)
+        let shiftedAperture = EyeObservation(
+            region: NormRect(x: region.x, y: region.y - 0.002,
+                             width: region.width, height: region.height),
+            pupilCenter: pupil, openness: 1, cornerMidpointY: region.center.y)
+
+        let firstAngles = GazeGeometry.eyeAngles(first, imageAspect: aspect)!
+        let shiftedAngles = GazeGeometry.eyeAngles(shiftedAperture, imageAspect: aspect)!
+        XCTAssertEqual(firstAngles.yaw, shiftedAngles.yaw, accuracy: 1e-12)
+        XCTAssertEqual(firstAngles.pitch, shiftedAngles.pitch, accuracy: 1e-12)
+    }
+
+    func testCornerRelativeEstimateIgnoresWholeEyeTranslation() {
+        let first = EyeObservation(
+            region: NormRect(x: 0.4, y: 0.4, width: 0.06, height: 0.02),
+            pupilCenter: NormPoint(x: 0.427, y: 0.407), openness: 1,
+            cornerMidpointY: 0.410)
+        let translated = EyeObservation(
+            region: NormRect(x: 0.5, y: 0.6, width: 0.06, height: 0.02),
+            pupilCenter: NormPoint(x: 0.527, y: 0.607), openness: 1,
+            cornerMidpointY: 0.610)
+
+        let firstAngles = GazeGeometry.eyeAngles(first, imageAspect: aspect)!
+        let translatedAngles = GazeGeometry.eyeAngles(translated, imageAspect: aspect)!
+        XCTAssertEqual(firstAngles.yaw, translatedAngles.yaw, accuracy: 1e-12)
+        XCTAssertEqual(firstAngles.pitch, translatedAngles.pitch, accuracy: 1e-12)
+    }
+
     // the whole point of correction: removing the observed gaze must send the iris back to centre
     func testCorrectionOpposesTheObservedGazeOnBothAxes() {
         for (dx, dy) in [(0.006, 0.003), (-0.006, -0.003), (0.004, -0.002), (-0.004, 0.002)] {

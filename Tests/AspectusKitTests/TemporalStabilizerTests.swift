@@ -3,10 +3,12 @@ import XCTest
 
 private let aspect = 1280.0 / 720.0
 
-private func observation(pupilX: Double, pupilY: Double = 0.405, openness: Double = 1.0) -> EyeObservation {
+private func observation(pupilX: Double, pupilY: Double = 0.405, openness: Double = 1.0,
+                         cornerMidpointY: Double? = nil) -> EyeObservation {
     EyeObservation(region: NormRect(x: 0.4, y: 0.4, width: 0.06, height: 0.02),
                    pupilCenter: NormPoint(x: pupilX, y: pupilY),
-                   openness: openness)
+                   openness: openness,
+                   cornerMidpointY: cornerMidpointY)
 }
 
 private func result(pupilX: Double, openness: Double = 1.0,
@@ -56,6 +58,16 @@ final class TemporalStabilizerTests: XCTestCase {
         XCTAssertEqual(blink.leftEye.openness, 0.0, accuracy: 1e-12,
                        "smoothing openness would slur the blink and delay the safety gate")
         XCTAssertEqual(blink.rightEye.openness, 0.0, accuracy: 1e-12)
+    }
+
+    func testCornerMidpointIsSmoothedWithTheLandmarks() {
+        var s = TemporalStabilizer()
+        var first = result(pupilX: 0.43)
+        first.leftEye.cornerMidpointY = 0.41
+        _ = s.stabilize(first, t: 0)
+        first.leftEye.cornerMidpointY = 0.51
+        let filtered = s.stabilize(first, t: 1.0 / 30.0)
+        XCTAssertLessThan(filtered.leftEye.cornerMidpointY ?? 1, 0.51)
     }
 
     func testResetMakesTheNextSamplePassThrough() {

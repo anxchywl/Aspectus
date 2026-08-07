@@ -225,13 +225,17 @@ struct CalibrationView: View {
                     .font(.callout).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
-                // what each step actually read, so the failure is diagnosable rather than opaque
+                // failed runs are not saved, so show the raw offsets needed to diagnose them
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(CalibrationTarget.allCases, id: \.self) { target in
                         line(target.rawValue, means[target].map {
                             String(format: "yaw %+.1f°  pitch %+.1f°  (%d)",
                                    $0.yawDegrees, $0.pitchDegrees, $0.count)
                         } ?? "no samples")
+                        if let m = means[target] {
+                            line("", String(format: "offset  x%+.4f  y%+.4f", m.offsetX, m.offsetY))
+                                .foregroundStyle(.tertiary)
+                        }
                     }
                 }
                 .font(.caption.monospaced())

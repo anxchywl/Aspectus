@@ -45,6 +45,7 @@ public struct EyeSample: Sendable, Equatable {
     public var region: NormRect
     public var pupil: NormPoint
     public var pupilOffset: NormPoint
+    public var cornerMidpointY: Double?
     public var openness: Double
     public var source: PupilSource
     public var pupilPointCount: Int
@@ -53,6 +54,7 @@ public struct EyeSample: Sendable, Equatable {
         region = e.region
         pupil = e.pupilCenter
         pupilOffset = e.pupilOffset
+        cornerMidpointY = e.cornerMidpointY
         openness = e.openness
         source = e.pupilSource
         pupilPointCount = e.pupilPointCount

@@ -103,6 +103,9 @@ public struct CalibrationSession: Sendable {
         public var yawDegrees: Double
         public var pitchDegrees: Double
         public var count: Int
+        /// raw pupil displacement behind the angles, averaged over both eyes and target samples
+        public var offsetX: Double = 0
+        public var offsetY: Double = 0
     }
 
     public let config: Config
@@ -159,7 +162,9 @@ public struct CalibrationSession: Sendable {
         let n = Double(matching.count)
         return TargetMeans(yawDegrees: matching.reduce(0) { $0 + $1.yawDegrees } / n,
                            pitchDegrees: matching.reduce(0) { $0 + $1.pitchDegrees } / n,
-                           count: matching.count)
+                           count: matching.count,
+                           offsetX: matching.reduce(0) { $0 + $1.offsetX } / n,
+                           offsetY: matching.reduce(0) { $0 + $1.offsetY } / n)
     }
 
     /// every target's reading so far, which is what makes a separation failure explainable
@@ -276,7 +281,11 @@ public struct CalibrationSession: Sendable {
             headYawDegrees: tracking.headPose.yaw * degrees,
             headPitchDegrees: tracking.headPose.pitch * degrees,
             headRollDegrees: tracking.headPose.roll * degrees,
-            confidence: combined.confidence))
+            confidence: combined.confidence,
+            leftOffsetX: tracking.leftEye.pupilOffset.x,
+            leftOffsetY: tracking.leftEye.pupilOffset.y,
+            rightOffsetX: tracking.rightEye.pupilOffset.x,
+            rightOffsetY: tracking.rightEye.pupilOffset.y))
         lastRejection = nil
 
         guard acceptedForTarget >= config.samplesPerTarget else { return .accepted }

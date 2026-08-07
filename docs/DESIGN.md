@@ -1,7 +1,7 @@
 # Aspectus for macOS — Design (Phase 1)
 
 Reference machine: Apple M3, macOS 26.6 (25G72), Xcode 26.6 (17F113), Swift 6.3.3 (measured).
-Status: phases 1–6 implemented; 181 unit tests green in a release build. The virtual camera is
+Status: phases 1–6 implemented; 193 unit tests green in a release build. The virtual camera is
 verified in three of the six conferencing hosts — Zoom, Google Meet and Microsoft Teams — and
 untested in the other three. See "Measured facts" below for what has actually been run on hardware.
 
@@ -176,7 +176,7 @@ preview visible: face tracking 19.2 / 29.2, warp 1.8 / 2.4, processing 45.7 / 61
     earlier and turns it from one observation into four.
   - Note that elapsed time in the CSV is *awake* time: `HostClock` does not advance while the
     machine sleeps, which is why 10.5 hours of wall clock produced 98 minutes of samples.
-- 181 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
+- 193 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
   and reopen, 1€ jitter reduction and bounded-lag tracking, gate hysteresis / angle-limit fallback
   / slew ramp, blink preservation, filter reset on tracking loss and timestamp discontinuity,
   recovery within the 300 ms budget, gaze geometry and warp containment, metrics percentiles,
@@ -368,28 +368,45 @@ Slack and OBS.
     motion (a single direction of travel leaves the two axes indistinguishable), spans under 12°,
     fewer than 40 samples, and any slope outside ±2.
   - The sweep is skippable, and skipping it leaves behaviour byte-for-byte unchanged.
-- ~~Per-axis scale is measured and wrong in opposite directions.~~ **Quantified and fitted.**
-  From a 300-sample calibration on a 326.6 × 211.4 mm built-in display (`CGDisplayScreenSize`),
-  refitted offline against real target geometry: at a 550 mm viewing distance the estimator needs
-  **yawGain 0.53** and **pitchGain 2.70** — horizontal over-reads ~1.9×, vertical under-reads
-  ~2.7×. Both inside the 0.2…4.0 plausibility band the fitter enforces.
-  - Gain fitting is now implemented, but it depends on a **user-supplied viewing distance**:
-    macOS exposes no camera field of view (`videoFieldOfView` and
-    `videoFieldOfView(for:geometricDistortionCorrected:)` are both `API_UNAVAILABLE(macos)`), so
-    scale cannot be recovered from the image. Sensitivity, measured: over 450–700 mm the fitted
-    yawGain spans 0.64…0.42 and pitchGain 3.23…2.16, so a ±100 mm distance error moves the gain by
-    roughly 10–20%.
-  - Yaw is fitted from the two side targets and pitch from the lens (exactly 0°) plus the bottom
-    edge. The "look above the camera" target is off the display, has no measurable position, and is
-    therefore a sign/separation check only — never an input to the fit.
-- An earlier reading of 0.9° vertical separation was a **procedure artifact**, not a property of
-  the estimator: the calibration flow was sampling during the saccade to each target, averaging
-  "up" and "down" toward each other. A 2 s settle window per target raised it to 9.7°.
-- The vertical estimate carries a measured systematic bias: the pupil sits above the eye-aperture
-  bounding-box centre on every frame of a run (normalized offset mean −0.0018 left, −0.0021 right),
-  which reads as a constant **≈ +4° of apparent upward gaze** (raw pitch stayed within +2.2°…+5.7°
-  and never went negative). This is the eyelid occlusion effect and is what phase 2 calibration
-  has to remove.
+- **Per-axis scale is fitted from physical display geometry.** The current 550 mm calibration
+  measures `yawGain ×1.00` and `pitchGain ×2.69`; horizontal scale is already accurate while the
+  geometric vertical estimate still under-reads by about 2.7× after the anchor fix below.
+  - The fit depends on a user-supplied viewing distance. macOS exposes no camera field of view
+    (`videoFieldOfView` and `videoFieldOfView(for:geometricDistortionCorrected:)` are both
+    `API_UNAVAILABLE(macos)`), so scale cannot be recovered from the image.
+  - Yaw is fitted from the two side targets and pitch from the lens plus the bottom edge. The target
+    above the camera has no measurable physical position and remains a sign/separation check only.
+- **The vertical estimator defect was isolated and fixed on hardware.** Two controlled runs using
+  `pupilCenter.y − eye.region.center.y` failed calibration at **1.7°** and **1.3°** of up-versus-down
+  separation while horizontal separation remained normal. The second run logged an independent
+  vertical anchor: the midpoint of the two eye corners.
+  - Down minus up pupil travel relative to the corner line was **+0.002477**. The eyelid-region
+    centre moved **+0.001845** in the same direction, leaving only **+0.000632** in the old offset.
+    The moving aperture centre therefore cancelled **74.5 %** of the usable vertical signal. Both
+    eyes agreed independently: corner-relative travel was +0.002459 left and +0.002494 right.
+  - Horizontal remains relative to `region.center.x`. Vertical now uses the corner midpoint, with
+    the corner signal smoothed by the same 1€ filter as the other landmarks. A missing corner falls
+    back to the old aperture centre rather than making the frame unusable.
+  - Calibration schema version **2** prevents a version-1 fit, learned from the incompatible
+    aperture-relative signal, from being applied silently.
+  - Two calibrations after the change passed at **10.1° / 29.6°** and **11.8° / 33.1°** vertical /
+    horizontal separation. The saved 300-sample fit has neutral bias yaw −0.79°, pitch +8.92°,
+    `yawGain ×1.00`, `pitchGain ×2.69`, and 60 accepted samples at every target.
+  - The 49.6 s clean Release run after the change measured Vision **5.94 / 6.45 ms**, track loop
+    **5.96 / 6.47 ms**, warp **0.61 / 0.72 ms**, and owned pipeline **0.07 / 0.56 ms** mean / p95.
+    One frame dropped, depth stayed zero and thermal state stayed nominal. Preview presentation was
+    **30.5 / 32.3 ms**, the already-known compositor wait that the virtual camera does not pay.
+- **Head compensation is procedure-sensitive, so only repeatable fits are trusted.** The first
+  version-2 sweep produced large pitch cross-coupling and a false 24° live result despite a nearly
+  neutral raw eye reading; that calibration was rejected and overwritten. The repeat produced
+  `yawFromYaw +0.280`, `yawFromPitch −0.066`, `pitchFromYaw +0.019`, `pitchFromPitch +0.081`, close
+  to the earlier independent fit (+0.192, −0.115, −0.004, +0.055). The sweep remains skippable.
+- Calibration samples retain the raw per-eye offsets, and failed calibration sheets show per-target
+  means, so future fit failures remain diagnosable even though unsuccessful runs are not saved.
+- The apparent 15° runtime head-gate anomaly was a comparison of different limits, not a gate
+  failure: fixation calibration uses 15°, while normal estimation uses the intended 25° limit.
+- Pupil source remained `visionLandmark` for both eyes on 100 % of the measured frames, one point
+  per eye; the contour-centroid fallback did not fire.
 - **Camera disconnect, session runtime errors and sleep/wake are handled, but only the healthy path
   is verified on hardware.** The session posts runtime errors, interruptions and device
   connect/disconnect; `NSWorkspace` supplies sleep and wake. The policy that turns those into

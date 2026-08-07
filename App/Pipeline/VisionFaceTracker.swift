@@ -85,12 +85,14 @@ struct VisionFaceTracker: FaceTracker {
                                   pupilCenter: leftPupil,
                                   openness: openness(eyePoints: leftEyePts),
                                   pupilSource: leftSource,
-                                  pupilPointCount: leftCount)
+                                  pupilPointCount: leftCount,
+                                  cornerMidpointY: EyeObservation.cornerMidpointY(of: leftEyePts))
         let right = EyeObservation(region: boundingRect(rightEyePts),
                                    pupilCenter: rightPupil,
                                    openness: openness(eyePoints: rightEyePts),
                                    pupilSource: rightSource,
-                                   pupilPointCount: rightCount)
+                                   pupilPointCount: rightCount,
+                                   cornerMidpointY: EyeObservation.cornerMidpointY(of: rightEyePts))
 
         // read from the rectangles observation: the landmarks copy is documented to carry the
         // pose through, but the original is the object that actually computed it
