@@ -1,9 +1,9 @@
 # Aspectus for macOS — Design (Phase 1)
 
 Reference machine: Apple M3, macOS 26.6 (25G72), Xcode 26.6 (17F113), Swift 6.3.3 (measured).
-Status: phases 1–6 implemented; 181 unit tests green in a release build. The virtual camera
-delivers frames to a capture client but has not been tried in any conferencing app. See
-"Measured facts" below for what has actually been run on hardware.
+Status: phases 1–6 implemented; 181 unit tests green in a release build. The virtual camera is
+verified in two of the six conferencing hosts — Zoom and Google Meet — and untested in the other
+four. See "Measured facts" below for what has actually been run on hardware.
 
 ## 1. Candidate comparison
 
@@ -88,11 +88,13 @@ construction, newest-frame-wins, drops counted. Zero-copy path: `CVPixelBuffer`�
 5. **CoreMediaIO Camera Extension lifecycle / signing / host-app quirks.** Mitigation: build
    the extension early against SimpleDALPlugin/`cameraextension` references; test the full host
    matrix (Zoom/Meet/Teams/Discord/Slack/OBS); handle camera + host disconnect/reacquire.
-   **Partly retired.** Signing, notarization and activation work, and the extension being replaced
-   under a running app is handled: the app rebuilds a connection whose queue has stopped draining,
-   rather than believing forever that it is still connected. **Zoom is verified**; the other five
-   hosts are untested, so host-app quirks remain an open risk. The one bug the Zoom test did find
-   was ours, not the host's: a stopped sink stream spun the extension's consume loop.
+   **Partly retired.** Signing, notarization and activation work. **Zoom and Google Meet are
+   verified**; Teams, Discord, Slack and OBS are untested, so host-app quirks remain an open risk.
+   Neither host test found a fault in the host: the one bug the Zoom test surfaced was ours, a
+   stopped sink stream spinning the extension's consume loop, and the Meet test found the sink's
+   reconnect after an extension replacement to be broken. That second finding narrows what this
+   entry used to claim — the app detects a connection whose queue has stopped draining, but it does
+   not successfully rebuild one; see "Known gaps".
 
 ## 6. Implementation phases
 Matches the brief: (1) Video foundation, (2) Tracking, (3) Correction prototype [**hard gate**:
@@ -205,7 +207,7 @@ variable rather than two:
 
 - the extension advertises `kCVPixelFormatType_32BGRA`, and CMIO forwards a format mismatch to
   hosts without complaint, so what the sink publishes has to stay BGRA unless the advertised format
-  changes with it — and changing that would invalidate the one host result we have.
+  changes with it — and changing that would invalidate both host results we have.
 - passthrough returns the capture buffer itself, and correction is detected downstream by buffer
   identity (`corrected.pixelBuffer !== frame.pixelBuffer`). On a YUV capture buffer both the preview
   renderer and the sink would receive pixels they cannot sample, so passthrough — 10 % of frames in
@@ -285,8 +287,8 @@ pure and live in `AspectusKit` with 11 unit tests, so neither needs a camera to 
 Closed at the end of the phase: the soak (97 minutes, negative memory trend), the first host of
 the conferencing matrix (Zoom, with a controlled before/after in the extension log), and the
 controlled latency run the tracking discrepancy demanded — that run was taken and is reported
-above, and it superseded the 19.2 ms figure rather than explaining it. Still open: the other five
-hosts.
+above, and it superseded the 19.2 ms figure rather than explaining it. Google Meet has since been
+verified the same way, taking the matrix to two of six. Still open: Teams, Discord, Slack and OBS.
 
 ## Known gaps
 
@@ -391,6 +393,23 @@ hosts.
   - An automatic reopen deliberately refuses to select Aspectus's own virtual camera, which is a
     video device like any other and would otherwise feed the pipeline its own output.
 - Restart after stop is fixed and unit-tested, but not yet verified end-to-end on hardware.
+- **The sink detects an extension replaced under it, and then fails to reconnect — silently.**
+  Measured while preparing the Meet test (release build, M3 / macOS 26.6): the extension was
+  upgraded from version 5 to 6 through the Install button with the app running. `revalidate`
+  noticed correctly and logged `the virtual camera stopped draining after 60 consecutive frames,
+  reconnecting`, and because it runs on the 0.5 s stats timer it then retried `connect` about twice
+  a second for over 80 s without ever succeeding. Settings showed `not connected` with the
+  frames-sent counter frozen, and the new extension process logged nothing at all, never having
+  been given a client.
+  - Not one line was logged in that whole window, which places the failure at `findDevice(named:)`
+    returning nil — the only early return in `connect` that says nothing. The two paths that do log,
+    a missing sink stream and a stream that will not start, both stayed quiet.
+  - Quitting and relaunching connected to the new extension immediately, so the device is findable
+    from a fresh process and the stale device list is per-process CMIO state in the app. Every
+    measurement in the Meet entry above was taken after that relaunch, on extension version 6.
+  - So the claim this file used to make in §5 — that a replacement under a running app is handled
+    because the app rebuilds the stalled connection — was half right. Detection works. The rebuild
+    does not, and until it does, replacing the extension requires relaunching the app.
 - ~~The virtual camera advertises 30 FPS while capture targets 60, so on a camera that reaches 60
   the app would publish faster than the format it advertises.~~ **Fixed, unit-tested rather than
   measured.** Publication goes through `PublishPacer`, a credit balance that holds the sink to the
@@ -409,12 +428,28 @@ hosts.
   memory trend. The earlier 433 MB reading is still unexplained, but it is no longer the only
   sustained observation, and nothing like it reappeared.
 - ~~The host matrix is untested — the virtual camera has never been tried in a conferencing app.~~
-  **One host of six is now verified: Zoom.** Aspectus appears in Zoom's camera list beside the
-  physical ones, and selecting it produced a live picture in Zoom's video preview. The control the
-  last host test lacked is present this time, from the extension's own log rather than from the
-  host's UI: `forwarding=false` before selection, `forwarding=true` with the source counter
-  climbing ~30 buffers/s while selected, and `forwarding=false` again the moment the camera was set
-  back to FaceTime HD. Meet, Teams, Discord, Slack and OBS remain untested.
+  **Two hosts of six are now verified: Zoom and Google Meet.** Aspectus appears in Zoom's camera
+  list beside the physical ones, and selecting it produced a live picture in Zoom's video preview.
+  The control the last host test lacked is present this time, from the extension's own log rather
+  than from the host's UI: `forwarding=false` before selection, `forwarding=true` with the source
+  counter climbing ~30 buffers/s while selected, and `forwarding=false` again the moment the camera
+  was set back to FaceTime HD. Teams, Discord, Slack and OBS remain untested.
+  - **Google Meet passes**, in an instant meeting rather than a settings preview, so the in-call
+    video path was the one exercised. Notarized Developer ID build of commit 33df5c4, extension
+    version 6, M3 / macOS 26.6, Chrome 150. The same log control, with Meet on the physical camera
+    as the baseline: `forwarding=false`, then `source startStream - a host attached` at 19:50:49 the
+    moment Aspectus was selected, the source counter going `forwarded 1` → `301 buffers` in 10 s
+    (≈30 fps), and `forwarding=true`. Detaching was tested twice — switching the camera back to
+    FaceTime HD, and leaving the call outright — and both produced `source stopStream` followed by
+    `forwarding=false`.
+  - Meet's own `MediaStreamTrack` reported `label: "Aspectus"`, **1280×720 at 30 fps**, matching the
+    advertised format exactly, so nothing was forwarded to the host as a mismatch. A canvas diff of
+    two frames 1.2 s apart confirmed a moving picture rather than a frozen one, which a screenshot
+    of the host's own preview cannot establish on its own.
+  - The app's HUD read `Correcting 100%` throughout at 30 fps capture / 30 fps output, and the
+    virtual camera panel ended the session at **8,433 sent · 0 paced · 0 dropped**. These are HUD
+    readings taken during the host test, not a CSV benchmark run, and no latency figure is quoted
+    from them.
 - **A host disconnecting used to spin the extension.** Found by that same test: when the sink
   stream stops, `consumeSampleBuffer` fails immediately, and the completion handler re-armed with
   no delay — measured at **1,189,895 log lines in 1.877 s**, roughly 634,000 failed consumes per
@@ -422,3 +457,9 @@ hosts.
   consume now retries on the same 0.1 s timer the late-client path already used, and a run of
   failures logs once rather than once each, with a recovery line when it clears. The loop still
   keeps exactly one request outstanding.
+  - **Nothing like it reappeared under Meet**, across two detaches: five log lines each time, a peak
+    of four lines in any one second over the whole five-minute session, and extension RSS flat at
+    13.4 MB. That is weaker evidence than it looks, and is recorded as such — under Meet the sink
+    stream never stopped, the consume counter kept climbing straight through both detaches, so the
+    failing branch this fix guards was never entered. Meet shows a host detach that does not spin;
+    it does not re-test the path that did.

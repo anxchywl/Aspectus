@@ -11,8 +11,9 @@ Native macOS, Apple Silicon only. Swift, SwiftUI, AVFoundation, Metal, Apple Vis
 CoreMediaIO camera extension. No Electron, no Python runtime.
 
 > [!WARNING]
-> **In development.** The pipeline runs end to end and the virtual camera works in Zoom, but the
-> other five host apps are untested and correction quality is a geometric baseline, not the target.
+> **In development.** The pipeline runs end to end and the virtual camera works in Zoom and Google
+> Meet, but the other four host apps are untested and correction quality is a geometric baseline,
+> not the target.
 > There are no releases yet, and building it yourself needs an Apple Developer ID — macOS will not
 > activate an unsigned camera extension. See [Status](#status).
 
@@ -115,7 +116,7 @@ Every number here comes from the app's own CSV recorder in a release build, neve
 | 3 — Geometric eye warp in Metal | ✅ working, over the latency budget |
 | 3b — Learned warp field (Core ML) | ⬜ blocked — no licence-clean weights |
 | 4 — Temporal quality: filters, gate, slew | ✅ wired and tested |
-| 5 — Virtual camera (CoreMediaIO) | ✅ verified in Zoom; five other hosts untested |
+| 5 — Virtual camera (CoreMediaIO) | ✅ verified in Zoom and Google Meet; four other hosts untested |
 | 6 — UI and hardening | ✅ settings, saved preferences, menus, inspector; 97-min soak passed |
 
 Known gaps and everything not yet measured on hardware are listed at the end of
