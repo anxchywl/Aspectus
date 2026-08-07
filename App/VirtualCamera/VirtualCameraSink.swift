@@ -271,13 +271,13 @@ final class VirtualCameraSink: @unchecked Sendable {
             mSelector: CMIOObjectPropertySelector(kCMIOObjectPropertyName),
             mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
             mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain))
-        var name: CFString? = nil
+        var name: Unmanaged<CFString>?
         var used: UInt32 = 0
-        let size = UInt32(MemoryLayout<CFString?>.size)
+        let size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         guard CMIOObjectGetPropertyData(device, &address, 0, nil, size, &used, &name) == noErr else {
             return nil
         }
-        return name as String?
+        return name?.takeRetainedValue() as String?
     }
 
     /// the extension vends both a source and a sink; only the sink accepts frames from us
