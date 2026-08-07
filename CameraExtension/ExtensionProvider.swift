@@ -283,7 +283,8 @@ final class ExtensionProviderSource: NSObject, CMIOExtensionProviderSource {
     init(clientQueue: DispatchQueue?) {
         super.init()
         provider = CMIOExtensionProvider(source: self, clientQueue: clientQueue)
-        deviceSource = ExtensionDeviceSource(localizedName: "Aspectus", deviceID: Self.deviceID)
+        deviceSource = ExtensionDeviceSource(localizedName: VirtualCameraIdentity.name,
+                                             deviceID: Self.deviceID)
         do {
             try provider.addDevice(deviceSource.device)
         } catch {

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import AspectusKit
 
@@ -36,9 +37,11 @@ struct ContentView: View {
 
             StatusPill(controller: controller).padding(14)
 
+            // along the bottom, not the top: the status pill owns the top-left corner, and a notice
+            // centred up there covers it as soon as the text is wide enough to reach
             extensionNotice
                 .padding(14)
-                .frame(maxWidth: .infinity, alignment: .top)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         }
         // the picture is always dark, so the things drawn over it are too, whatever the system theme
         .environment(\.colorScheme, .dark)
@@ -79,15 +82,38 @@ struct ContentView: View {
 
     @ViewBuilder
     private var extensionNotice: some View {
-        switch virtualCamera.state {
-        case .needsApproval:
-            notice("Allow the camera extension in System Settings ▸ General ▸ Login Items & Extensions",
-                   systemImage: "exclamationmark.shield", tint: .orange)
-        case let .failed(message):
-            notice("Virtual camera could not install — \(message)",
-                   systemImage: "exclamationmark.triangle", tint: .orange)
-        default:
-            EmptyView()
+        // a lost camera outranks the installer's own state, because it is usually the *result* of a
+        // successful install and reporting that install as fine would be the less useful truth. a
+        // camera the user removed on purpose is the exception: it looks identical from the sink, and
+        // telling them to relaunch would send them after a camera they meant to get rid of
+        if controller.virtualCameraLost, virtualCamera.state != .removed {
+            HStack(spacing: 10) {
+                notice("The camera extension was replaced — relaunch to publish again",
+                       systemImage: "arrow.clockwise.circle", tint: .orange)
+                Button("Relaunch") { relaunch() }
+                    .buttonStyle(.borderedProminent)
+            }
+        } else {
+            switch virtualCamera.state {
+            case .needsApproval:
+                notice("Allow the camera extension in System Settings ▸ General ▸ Login Items & Extensions",
+                       systemImage: "exclamationmark.shield", tint: .orange)
+            case let .failed(message):
+                notice("Virtual camera could not install — \(message)",
+                       systemImage: "exclamationmark.triangle", tint: .orange)
+            default:
+                EmptyView()
+            }
+        }
+    }
+
+    /// the only cure for a replaced extension, since the device is invisible to this process forever
+    private func relaunch() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL,
+                                           configuration: configuration) { _, _ in
+            Task { @MainActor in NSApp.terminate(nil) }
         }
     }
 

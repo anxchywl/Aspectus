@@ -121,6 +121,13 @@ struct SettingsView: View {
                      + "▸ Login Items & Extensions. Removing it takes the Aspectus camera away from "
                      + "every app; the preview here carries on either way.")
                     .font(.caption).foregroundStyle(.secondary)
+
+                if controller.virtualCameraLost, virtualCamera.state != .removed {
+                    Text("Installing over a running extension replaces it, and macOS never shows the "
+                         + "new camera to an app that was already open. Aspectus has to be relaunched "
+                         + "before it can publish again.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
 
             Section("Published") {

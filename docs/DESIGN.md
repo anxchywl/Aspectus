@@ -92,9 +92,10 @@ construction, newest-frame-wins, drops counted. Zero-copy path: `CVPixelBuffer`�
    verified**; Teams, Discord, Slack and OBS are untested, so host-app quirks remain an open risk.
    Neither host test found a fault in the host: the one bug the Zoom test surfaced was ours, a
    stopped sink stream spinning the extension's consume loop, and the Meet test found the sink's
-   reconnect after an extension replacement to be broken. That second finding narrows what this
-   entry used to claim — the app detects a connection whose queue has stopped draining, but it does
-   not successfully rebuild one; see "Known gaps".
+   reconnect after an extension replacement to be broken. That second finding corrects what this
+   entry used to claim. An extension replaced under a running app **cannot** be reconnected to from
+   that process — macOS never shows it the new device, by any lookup — so the app detects the loss,
+   says so, and offers a relaunch, which is the only thing that works. See "Known gaps".
 
 ## 6. Implementation phases
 Matches the brief: (1) Video foundation, (2) Tracking, (3) Correction prototype [**hard gate**:
@@ -393,23 +394,44 @@ verified the same way, taking the matrix to two of six. Still open: Teams, Disco
   - An automatic reopen deliberately refuses to select Aspectus's own virtual camera, which is a
     video device like any other and would otherwise feed the pipeline its own output.
 - Restart after stop is fixed and unit-tested, but not yet verified end-to-end on hardware.
-- **The sink detects an extension replaced under it, and then fails to reconnect — silently.**
-  Measured while preparing the Meet test (release build, M3 / macOS 26.6): the extension was
-  upgraded from version 5 to 6 through the Install button with the app running. `revalidate`
-  noticed correctly and logged `the virtual camera stopped draining after 60 consecutive frames,
-  reconnecting`, and because it runs on the 0.5 s stats timer it then retried `connect` about twice
-  a second for over 80 s without ever succeeding. Settings showed `not connected` with the
-  frames-sent counter frozen, and the new extension process logged nothing at all, never having
-  been given a client.
-  - Not one line was logged in that whole window, which places the failure at `findDevice(named:)`
-    returning nil — the only early return in `connect` that says nothing. The two paths that do log,
-    a missing sink stream and a stream that will not start, both stayed quiet.
-  - Quitting and relaunching connected to the new extension immediately, so the device is findable
-    from a fresh process and the stale device list is per-process CMIO state in the app. Every
-    measurement in the Meet entry above was taken after that relaunch, on extension version 6.
-  - So the claim this file used to make in §5 — that a replacement under a running app is handled
-    because the app rebuilds the stalled connection — was half right. Detection works. The rebuild
-    does not, and until it does, replacing the extension requires relaunching the app.
+- ~~**The sink detects an extension replaced under it, and then fails to reconnect — silently.**~~
+  **Diagnosed, and the cause turned out to be the OS rather than the lookup.** Found while preparing
+  the Meet test: the extension was upgraded from version 5 to 6 through the Install button with the
+  app running. `revalidate` noticed correctly and logged `the virtual camera stopped draining after
+  60 consecutive frames, reconnecting`, then retried `connect` twice a second for over 80 s without
+  ever succeeding, silently, with the frames-sent counter frozen.
+  - **A replaced CMIO device is invisible to every process that was already running.** Measured with
+    two probes held across a real replacement, identical but for one variable: both were told the
+    old device had gone — a `kCMIOHardwarePropertyDevices` listener fired 140 ms before polling
+    noticed — and **neither was ever told the new one arrived**. A listener is not the missing
+    piece: it reports the removal and stays silent on the re-add.
+  - Five in-process lookups were then tried from a blinded process, and **all five fail**: the
+    device array, `kCMIOHardwarePropertyDeviceForUID` translation of the extension's stable uid,
+    AVFoundation's own discovery session, AVFoundation followed by the array, and poking a system
+    property to force a rescan followed by the array. A process launched at the same moment found
+    the device by all five at once, at the same device id the blinded process had lost. The
+    blindness held for 12 minutes before the probe was stopped; the earlier probe held it for 13.
+  - So there is no in-process cure, and a uid fallback was written, measured to be useless, and
+    removed rather than shipped as a fallback that never fires.
+- **What the app does about it now.** Since the camera cannot come back, the fix is to stop failing
+  silently and to say the one thing that works.
+  - Every `connect` failure names its reason and is reported on the edge — once per run of failures
+    rather than at the 2 Hz the stats timer retries. Measured over a 53 s outage, roughly 106
+    attempts: **one log line**, against none at all before.
+  - A camera this process held and lost for more than 3 s is reported as lost, which surfaces a
+    non-blocking notice over the preview and a **Relaunch** button. The preview and correction carry
+    on untouched, because the virtual camera is an output and never a dependency.
+  - A camera the user removed on purpose is excluded, so **Remove** does not advise a pointless
+    relaunch. That needed a smaller fix underneath it: both activation and deactivation report
+    success through the same delegate callback, so the installer had been reporting `active` after a
+    successful removal.
+  - **Verified end to end** (release build 11, notarized, M3 / macOS 26.6): extension replaced under
+    the running app at 20:26:51.341, one failure line at 20:26:51.346, Relaunch pressed, and the new
+    process connected at 20:27:41 to extension version 11.
+  - Not verified: a *first* install while the app is running, which may be blind for the same reason
+    and would show nothing, since a camera never held cannot be reported as lost. Testing it means
+    uninstalling the extension, which was judged not worth doing to a working machine. The removal
+    path's wording is likewise reasoned rather than measured.
 - ~~The virtual camera advertises 30 FPS while capture targets 60, so on a camera that reaches 60
   the app would publish faster than the format it advertises.~~ **Fixed, unit-tested rather than
   measured.** Publication goes through `PublishPacer`, a credit balance that holds the sink to the

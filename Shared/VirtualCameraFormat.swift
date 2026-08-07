@@ -9,3 +9,11 @@ enum VirtualCameraFormat {
     static let height: Int32 = 720
     static let frameRate: Int32 = 30
 }
+
+/// the name the virtual camera vends, compiled into both targets
+///
+/// the extension advertises it and the app matches devices on it, so the two must not drift; capture
+/// also uses it to make sure a reopen never selects the camera we publish into
+enum VirtualCameraIdentity {
+    static let name = "Aspectus"
+}

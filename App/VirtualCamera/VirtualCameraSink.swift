@@ -37,7 +37,34 @@ final class VirtualCameraSink: @unchecked Sendable {
 
     /// the localized name the extension vends; matching on it avoids hard-coding a device id, and
     /// capture uses it to make sure a reopen never selects the camera we publish into
-    static let deviceName = "Aspectus"
+    static let deviceName = VirtualCameraIdentity.name
+
+    /// whether the current run of failed connects has already been reported
+    private var reportedFailure = false
+    /// before the user installs the extension there is nothing to connect to, and saying so would be
+    /// noise rather than news; only a camera we have actually held can be reported as lost
+    private var everConnected = false
+    /// when a camera we held stopped being reachable, which is what `isLost` is measured from
+    private var lostAt: Date?
+
+    /// how long a camera stays merely missing before it is called lost
+    ///
+    /// generous next to the 0.5 s retry, because the point is to be sure rather than quick: nothing
+    /// the user could do about it gets better by being told sooner
+    private static let lostAfter: TimeInterval = 3
+
+    /// a camera this process held, lost, and cannot get back
+    ///
+    /// measured on macOS 26.6: when the extension is replaced, this process is told the old device
+    /// went away and never that the new one arrived. no lookup finds it again — not the device list,
+    /// not uid translation, not AVFoundation — while a process started afterwards sees it at once.
+    /// so this state is terminal for the process, and the only thing that clears it is a relaunch
+    var isLost: Bool {
+        lock.withLock {
+            guard everConnected, !started, let lostAt else { return false }
+            return Date().timeIntervalSince(lostAt) >= Self.lostAfter
+        }
+    }
 
     var isConnected: Bool { lock.withLock { started } }
 
@@ -53,21 +80,25 @@ final class VirtualCameraSink: @unchecked Sendable {
         defer { lock.unlock() }
         guard !started else { return true }
 
-        guard let device = findDevice(named: Self.deviceName) else { return false }
+        guard let device = findDevice(named: Self.deviceName) else {
+            reportFailure("it is not in this process's device list")
+            return false
+        }
+
         guard let sink = findSinkStream(of: device) else {
-            log.error("the virtual camera has no sink stream")
+            reportFailure("it has no sink stream")
             return false
         }
 
         var cmQueue: Unmanaged<CMSimpleQueue>?
         let status = CMIOStreamCopyBufferQueue(sink, { _, _, _ in }, nil, &cmQueue)
         guard status == noErr, let cmQueue else {
-            log.error("could not take the sink queue: \(status)")
+            reportFailure("its queue could not be taken: \(status)")
             return false
         }
 
         guard CMIODeviceStartStream(device, sink) == noErr else {
-            log.error("could not start the sink stream")
+            reportFailure("its sink stream would not start")
             return false
         }
 
@@ -77,8 +108,26 @@ final class VirtualCameraSink: @unchecked Sendable {
         started = true
         sequence = 0
         consecutiveDrops = 0
+        reportedFailure = false
+        everConnected = true
+        lostAt = nil
         log.info("connected to the virtual camera")
         return true
+    }
+
+    /// reports the first failure of a run and stays quiet for the rest of it
+    ///
+    /// `revalidate` retries on the stats timer, so a failure that persists is the same failure twice
+    /// a second; a run of them is one fact, and this process has already flooded the unified log once
+    private func reportFailure(_ reason: String) {
+        guard everConnected else { return }
+        if lostAt == nil { lostAt = Date() }
+        guard !reportedFailure else { return }
+        reportedFailure = true
+        log.error("""
+            could not connect to the virtual camera: \(reason, privacy: .public). \
+            retrying on the stats timer
+            """)
     }
 
     func disconnect() {

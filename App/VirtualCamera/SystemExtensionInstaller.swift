@@ -15,6 +15,8 @@ final class SystemExtensionInstaller: NSObject, ObservableObject {
         /// macOS is waiting for the user to allow it in System Settings
         case needsApproval
         case activated
+        /// the user removed it on purpose, which looks identical to a loss from the sink's side
+        case removed
         case failed(String)
 
         var summary: String {
@@ -23,6 +25,7 @@ final class SystemExtensionInstaller: NSObject, ObservableObject {
             case .requesting: return "installing…"
             case .needsApproval: return "allow in System Settings ▸ General ▸ Login Items & Extensions"
             case .activated: return "active"
+            case .removed: return "removed"
             case let .failed(message): return "failed: \(message)"
             }
         }
@@ -33,8 +36,12 @@ final class SystemExtensionInstaller: NSObject, ObservableObject {
     private let identifier = "com.aspectus.app.cameraextension"
     private let log = Logger(subsystem: "com.aspectus.app", category: "extension")
 
+    /// both requests report success the same way, so which one was asked for has to be remembered
+    private var requestedRemoval = false
+
     func activate() {
         state = .requesting
+        requestedRemoval = false
         let request = OSSystemExtensionRequest.activationRequest(
             forExtensionWithIdentifier: identifier, queue: .main)
         request.delegate = self
@@ -45,6 +52,7 @@ final class SystemExtensionInstaller: NSObject, ObservableObject {
     /// installed it is a support problem, not a feature
     func deactivate() {
         state = .requesting
+        requestedRemoval = true
         let request = OSSystemExtensionRequest.deactivationRequest(
             forExtensionWithIdentifier: identifier, queue: .main)
         request.delegate = self
@@ -71,7 +79,7 @@ extension SystemExtensionInstaller: OSSystemExtensionRequestDelegate {
         Task { @MainActor in
             switch result {
             case .completed:
-                self.state = .activated
+                self.state = self.requestedRemoval ? .removed : .activated
             case .willCompleteAfterReboot:
                 self.state = .failed("needs a restart to finish")
             @unknown default:

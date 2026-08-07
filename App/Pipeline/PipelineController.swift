@@ -45,6 +45,8 @@ final class PipelineController: ObservableObject {
     @Published private(set) var virtualCameraState = "not connected"
     /// the same fact as the state string, for anything that has to branch on it rather than show it
     @Published private(set) var virtualCameraConnected = false
+    /// the extension was replaced under us and this process can no longer see the device it vends
+    @Published private(set) var virtualCameraLost = false
     @Published private(set) var virtualCameraSent = 0
     @Published private(set) var virtualCameraDropped = 0
     @Published private(set) var virtualCameraPaced = 0
@@ -774,7 +776,11 @@ final class PipelineController: ObservableObject {
         // restart either way
         virtualCamera.revalidate()
         virtualCameraConnected = virtualCamera.isConnected
-        virtualCameraState = virtualCameraConnected ? "streaming" : "not connected"
+        virtualCameraLost = virtualCamera.isLost
+        // the row states what is true; whether to advise a relaunch depends on why the camera went
+        // away, which only the installer knows
+        virtualCameraState = virtualCameraConnected ? "streaming"
+            : (virtualCameraLost ? "lost" : "not connected")
         virtualCameraSent = virtualCamera.sent
         virtualCameraDropped = virtualCamera.dropped
         virtualCameraPaced = virtualCamera.paced
