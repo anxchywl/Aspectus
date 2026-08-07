@@ -234,6 +234,14 @@ The geometric warp resamples the iris and is stable once filtered, but it cannot
 interaction or iris occlusion, so it degrades visibly at larger redirect angles. It is a working,
 licence-clean baseline behind the `EyeCorrector` seam, not the final quality target.
 
+The conservative large-pose path is verified on hardware. In a 112.6 s installed-release run,
+head pose reached 66.8° yaw and 27.7° pitch; 38 sampled intervals named `headPose`, set correction
+to passthrough and kept the virtual camera streaming. Returning inside the trusted range restored
+full correction for 55 sampled intervals. Capture/output held 30/29 fps, queue depth stayed zero,
+the app dropped one startup frame and the virtual camera dropped none while sending 3,329 frames.
+This verifies fallback and recovery, not visual naturalness. Glasses and genuinely low illumination
+remain untested because neither physical condition was confirmed during the run.
+
 ### Phase 5: the virtual camera delivers
 
 Signing, notarization, activation and enumeration all work: the extension installs from a
@@ -407,9 +415,9 @@ Slack and OBS.
   failure: fixation calibration uses 15°, while normal estimation uses the intended 25° limit.
 - Pupil source remained `visionLandmark` for both eyes on 100 % of the measured frames, one point
   per eye; the contour-centroid fallback did not fire.
-- **Camera disconnect, session runtime errors and sleep/wake are handled, but only the healthy path
-  is verified on hardware.** The session posts runtime errors, interruptions and device
-  connect/disconnect; `NSWorkspace` supplies sleep and wake. The policy that turns those into
+- **Camera disconnect and session runtime errors are handled but remain unverified on hardware;
+  sleep/wake and stop/restart are verified.** The session posts runtime errors, interruptions and
+  device connect/disconnect; `NSWorkspace` supplies sleep and wake. The policy that turns those into
   decisions is `CaptureRecovery` in the kit, so it is unit-tested without a camera: sleep suspends
   and only waking restarts, a disconnect suspends and tries once more in case another camera is
   attached, a missing device stops the ladder and waits for a connect notification, and repeated
@@ -428,10 +436,14 @@ Slack and OBS.
   - Also measured: registering the observers costs nothing on the healthy path — capture holds
     30.0 fps with process and output rates unchanged.
   - The disconnect and runtime-error transitions are unit-tested but have **not** been exercised on
-    hardware — the reference machine's camera is built in and cannot be unplugged.
+    hardware. The reference machine exposes one physical device, the built-in FaceTime camera;
+    Aspectus and GazeAt are virtual cameras and cannot substitute for an unplug test.
   - An automatic reopen deliberately refuses to select Aspectus's own virtual camera, which is a
     video device like any other and would otherwise feed the pipeline its own output.
-- Restart after stop is fixed and unit-tested, but not yet verified end-to-end on hardware.
+- **Restart after stop is verified end to end** in the installed, notarized build. Capture and
+  output returned at 30 / 29 fps, preview and virtual-camera counters resumed inside the next
+  one-second sample, full output rate returned within two seconds, queue depth stayed zero and the
+  dropped-frame count remained at one across the stop/restart cycle.
 - ~~**The sink detects an extension replaced under it, and then fails to reconnect — silently.**~~
   **Diagnosed, and the cause turned out to be the OS rather than the lookup.** Found while preparing
   the Meet test: the extension was upgraded from version 5 to 6 through the Install button with the
