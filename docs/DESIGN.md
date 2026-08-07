@@ -304,6 +304,26 @@ Slack and OBS.
   coming back. Capture held 30.0 throughout and process held 29.2, which is correct rather than a
   remaining latch: the consumer loop goes on tracking and correcting while nothing is presented.
   Four unit tests cover the decay, the recovery and the two-sample floor.
+- ~~The rate meters can report a frame rate the hardware cannot produce.~~ **Found on screen and
+  fixed.** During the Teams test the HUD read **output 58 fps while capture and process both read
+  30**, which is impossible — output frames are a subset of processed ones. Earlier, while Teams was
+  installing, capture read **78 fps** on a camera whose every format caps at 30.
+  - Cause: the rate was `(samples - 1) / (now - oldest sample in the window)`. That divisor is the
+    spread of the samples, not the window. A source that stalls and then catches up puts a whole
+    window's frames into part of one, so the meter reported the burst instead of the rate. The two
+    readings are exactly that arithmetic: 30 samples bunched into 0.5 s give 58, and into 0.37 s
+    give 78.
+  - Fix: divide by the window. While the meter is younger than one window there is no window to
+    divide by, so its own age stands in and a young meter still reads true instead of ramping.
+  - Reproduced deterministically before fixing: a test that stalls, then delivers 30 frames at
+    60 fps, read **60.0 fps** for a source that put 30 events in the window. The first attempt at
+    that test passed against the bug — the stall plus the burst has to outlast the window, or one
+    surviving pre-stall sample keeps the divisor wide and hides it.
+  - Verified on hardware (release build, extension 11): the window was left fully occluded behind
+    another app for 12 s and then revealed, which is the manoeuvre that produced the 58. Capture
+    read 30 and process and output 28–29 across six samples over the first six seconds, with no
+    reading above 30 at any point.
+  - The decay behaviour above is unchanged and still covered; 183 unit tests pass.
 - ~~Whether Vision supplies true pupil landmarks or falls back to the eye-contour centroid is
   unconfirmed.~~ **Resolved by measurement** (phase 1 diagnostics, release build, M3 / macOS 26.6,
   FaceTime HD at 1280×720): `leftPupil`/`rightPupil` are populated on **100 % of tracked frames**,

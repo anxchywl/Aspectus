@@ -34,6 +34,32 @@ final class RateMeterTests: XCTestCase {
                        "past the window every sample has expired and the rate is zero")
     }
 
+    /// a source that stalls and then catches up delivers a second's worth of frames in less than a
+    /// second. measured on screen: output read 58 fps and capture 78 fps on a camera that cannot
+    /// exceed 30, because the rate was taken across the burst rather than across the window
+    func testABurstAfterAStallCannotReadAboveTheSourceRate() {
+        var meter = RateMeter()
+        _ = steady(&meter, frames: 60)
+
+        // the stall plus the burst has to outlast the window, or a surviving pre-stall sample keeps
+        // the span wide and hides the fault
+        let stallEnded = 59 * interval + 0.6
+        var last: Double = 0
+        for i in 0..<30 { last = meter.tick(at: stallEnded + Double(i) / 60.0) }
+
+        // thirty events fell in the last second, so no reading above ~30 is defensible
+        XCTAssertLessThanOrEqual(last, 32, "a catch-up burst must not read as a higher frame rate")
+    }
+
+    /// the window is the denominator, but only once there has been a window of it to measure
+    func testRampsUpHonestlyBeforeAFullWindowHasElapsed() {
+        var meter = RateMeter()
+        let last = steady(&meter, frames: 10)
+        XCTAssertEqual(last, 30, accuracy: 1,
+                       "a young meter must report the rate it has seen, not divide by a window "
+                       + "that has not elapsed")
+    }
+
     func testResumesAfterAStall() {
         var meter = RateMeter()
         _ = steady(&meter, frames: 60)
