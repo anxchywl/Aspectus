@@ -105,7 +105,11 @@ unreachable because this camera caps at 30 at every format it offers. An earlier
 19.2 ms for tracking; that number was a mislabelled metric and is not reproducible by any build —
 the whole reconciliation is in [docs/DESIGN.md](./docs/DESIGN.md).
 
-Every number here comes from the app's own CSV recorder in a release build, never an estimate.
+Every number here comes from the app's own CSV recorder in a release build, never an estimate. The
+HUD's frame-rate meters count events over a fixed window rather than across the gap between them, so
+a source that stalls and then catches up now reads as the rate it really delivered — before that fix
+it briefly showed 58 fps of output while capture and process both read 30, and 78 fps of capture
+from a camera that caps at 30.
 
 ## Status
 
