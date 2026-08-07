@@ -2,8 +2,8 @@
 
 Reference machine: Apple M3, macOS 26.6 (25G72), Xcode 26.6 (17F113), Swift 6.3.3 (measured).
 Status: phases 1–6 implemented; 181 unit tests green in a release build. The virtual camera is
-verified in two of the six conferencing hosts — Zoom and Google Meet — and untested in the other
-four. See "Measured facts" below for what has actually been run on hardware.
+verified in three of the six conferencing hosts — Zoom, Google Meet and Microsoft Teams — and
+untested in the other three. See "Measured facts" below for what has actually been run on hardware.
 
 ## 1. Candidate comparison
 
@@ -88,8 +88,8 @@ construction, newest-frame-wins, drops counted. Zero-copy path: `CVPixelBuffer`�
 5. **CoreMediaIO Camera Extension lifecycle / signing / host-app quirks.** Mitigation: build
    the extension early against SimpleDALPlugin/`cameraextension` references; test the full host
    matrix (Zoom/Meet/Teams/Discord/Slack/OBS); handle camera + host disconnect/reacquire.
-   **Partly retired.** Signing, notarization and activation work. **Zoom and Google Meet are
-   verified**; Teams, Discord, Slack and OBS are untested, so host-app quirks remain an open risk.
+   **Partly retired.** Signing, notarization and activation work. **Zoom, Google Meet and Microsoft
+   Teams are verified**; Discord, Slack and OBS are untested, so host quirks remain an open risk.
    Neither host test found a fault in the host: the one bug the Zoom test surfaced was ours, a
    stopped sink stream spinning the extension's consume loop, and the Meet test found the sink's
    reconnect after an extension replacement to be broken. That second finding corrects what this
@@ -208,7 +208,7 @@ variable rather than two:
 
 - the extension advertises `kCVPixelFormatType_32BGRA`, and CMIO forwards a format mismatch to
   hosts without complaint, so what the sink publishes has to stay BGRA unless the advertised format
-  changes with it — and changing that would invalidate both host results we have.
+  changes with it — and changing that would invalidate all three host results we have.
 - passthrough returns the capture buffer itself, and correction is detected downstream by buffer
   identity (`corrected.pixelBuffer !== frame.pixelBuffer`). On a YUV capture buffer both the preview
   renderer and the sink would receive pixels they cannot sample, so passthrough — 10 % of frames in
@@ -288,8 +288,9 @@ pure and live in `AspectusKit` with 11 unit tests, so neither needs a camera to 
 Closed at the end of the phase: the soak (97 minutes, negative memory trend), the first host of
 the conferencing matrix (Zoom, with a controlled before/after in the extension log), and the
 controlled latency run the tracking discrepancy demanded — that run was taken and is reported
-above, and it superseded the 19.2 ms figure rather than explaining it. Google Meet has since been
-verified the same way, taking the matrix to two of six. Still open: Teams, Discord, Slack and OBS.
+above, and it superseded the 19.2 ms figure rather than explaining it. Google Meet and Microsoft
+Teams have since been verified the same way, taking the matrix to three of six. Still open: Discord,
+Slack and OBS.
 
 ## Known gaps
 
@@ -450,12 +451,12 @@ verified the same way, taking the matrix to two of six. Still open: Teams, Disco
   memory trend. The earlier 433 MB reading is still unexplained, but it is no longer the only
   sustained observation, and nothing like it reappeared.
 - ~~The host matrix is untested — the virtual camera has never been tried in a conferencing app.~~
-  **Two hosts of six are now verified: Zoom and Google Meet.** Aspectus appears in Zoom's camera
-  list beside the physical ones, and selecting it produced a live picture in Zoom's video preview.
-  The control the last host test lacked is present this time, from the extension's own log rather
-  than from the host's UI: `forwarding=false` before selection, `forwarding=true` with the source
-  counter climbing ~30 buffers/s while selected, and `forwarding=false` again the moment the camera
-  was set back to FaceTime HD. Teams, Discord, Slack and OBS remain untested.
+  **Three hosts of six are now verified: Zoom, Google Meet and Microsoft Teams.** Aspectus appears
+  in Zoom's camera list beside the physical ones, and selecting it produced a live picture in Zoom's
+  video preview. The control the last host test lacked is present this time, from the extension's
+  own log rather than from the host's UI: `forwarding=false` before selection, `forwarding=true`
+  with the source counter climbing ~30 buffers/s while selected, and `forwarding=false` again the
+  moment the camera was set back to FaceTime HD. Discord, Slack and OBS remain untested.
   - **Google Meet passes**, in an instant meeting rather than a settings preview, so the in-call
     video path was the one exercised. Notarized Developer ID build of commit 33df5c4, extension
     version 6, M3 / macOS 26.6, Chrome 150. The same log control, with Meet on the physical camera
@@ -472,6 +473,21 @@ verified the same way, taking the matrix to two of six. Still open: Teams, Disco
     virtual camera panel ended the session at **8,433 sent · 0 paced · 0 dropped**. These are HUD
     readings taken during the host test, not a CSV benchmark run, and no latency figure is quoted
     from them.
+  - **Microsoft Teams passes** (desktop app, build 26198.202.4929.7171, on extension version 11).
+    Aspectus is listed in Settings ▸ Devices ▸ Camera beside FaceTime HD, and selecting it put a
+    live corrected picture in Teams' own video preview. Same log control, same shape as the others:
+    `forwarding=false` on the physical camera, then `source startStream - a host attached` at
+    20:48:36.923 the moment Aspectus was picked, `forwarded 1` → `301 buffers` in 10 s, and
+    `source stopStream` with `forwarding=false` on switching back. No spin: eight lines after the
+    detach, and a peak of two log lines in any one second across the whole session.
+  - **This result is weaker than the Meet one, in one specific way.** Teams is a native app, so
+    there was no way to read back the `MediaStreamTrack` it negotiated; the geometry is right on our
+    side, where the extension advertises it and the sink checks real buffers before publishing, but
+    unlike Meet there is no reading from inside the host. Treat "Teams sees 1280×720 at 30" as
+    inferred rather than measured.
+  - Getting there needed the Teams desktop app updated: the installed copy was hard-blocked behind a
+    mandatory update wall, and `teams.microsoft.com` failed to render at all, dying in auth
+    initialisation across three loads despite a valid Microsoft session.
 - **A host disconnecting used to spin the extension.** Found by that same test: when the sink
   stream stops, `consumeSampleBuffer` fails immediately, and the completion handler re-armed with
   no delay — measured at **1,189,895 log lines in 1.877 s**, roughly 634,000 failed consumes per
