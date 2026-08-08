@@ -17,7 +17,7 @@ The split is what keeps the pipeline core testable without a camera, a GUI or a 
 generate`; never edit the project file.
 
 ```bash
-swift test                  # 202 unit tests, no hardware
+swift test                  # 206 unit tests, no hardware
 swift build -c release      # the core alone
 xcodegen generate           # after any project.yml change
 ```

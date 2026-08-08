@@ -43,6 +43,7 @@ public enum GazeDatasetPlan {
     public static let samplesPerTarget = 6
     public static let captureIntervalSeconds = 0.08
     public static let settleSeconds = 0.65
+    public static let lensSettleSeconds = 2.0
     public static let poseTransitionSettleSeconds = 1.5
 
     private static let fractions = [0.10, 0.30, 0.50, 0.70, 0.90]
@@ -110,7 +111,97 @@ public enum GazeDatasetRejection: String, Codable, Sendable, Equatable, CaseIter
     case eyesClosed
     case headPoseUnavailable
     case headPose
+    case posePrompt
     case degenerateEyes
+}
+
+/// verifies that prompted head positions add real pose coverage instead of relying on instructions
+public struct GazePosePromptGate: Sendable, Equatable {
+    public struct Config: Sendable, Equatable {
+        public var minimumHorizontalChangeDegrees: Double
+        public var minimumVerticalChangeDegrees: Double
+
+        public init(minimumHorizontalChangeDegrees: Double = 6,
+                    minimumVerticalChangeDegrees: Double = 5) {
+            self.minimumHorizontalChangeDegrees = minimumHorizontalChangeDegrees
+            self.minimumVerticalChangeDegrees = minimumVerticalChangeDegrees
+        }
+    }
+
+    private var config: Config
+    private var neutralYawTotal = 0.0
+    private var neutralPitchTotal = 0.0
+    private var neutralSamples = 0
+    private var leftYawSign: Double?
+    private var upPitchSign: Double?
+
+    public init(config: Config = .init()) { self.config = config }
+
+    public mutating func accepts(_ prompt: GazePosePrompt,
+                                 yawDegrees: Double, pitchDegrees: Double) -> Bool {
+        switch prompt {
+        case .neutral:
+            neutralYawTotal += yawDegrees
+            neutralPitchTotal += pitchDegrees
+            neutralSamples += 1
+            return true
+        case .turnLeft:
+            guard let baseline = neutralYaw else { return false }
+            let change = yawDegrees - baseline
+            guard abs(change) >= config.minimumHorizontalChangeDegrees else { return false }
+            if leftYawSign == nil { leftYawSign = change.sign == .minus ? -1 : 1 }
+            return change * (leftYawSign ?? 0) > 0
+        case .turnRight:
+            guard let baseline = neutralYaw, let leftYawSign else { return false }
+            let change = yawDegrees - baseline
+            return abs(change) >= config.minimumHorizontalChangeDegrees
+                && change * leftYawSign < 0
+        case .lookUp:
+            guard let baseline = neutralPitch else { return false }
+            let change = pitchDegrees - baseline
+            guard abs(change) >= config.minimumVerticalChangeDegrees else { return false }
+            if upPitchSign == nil { upPitchSign = change.sign == .minus ? -1 : 1 }
+            return change * (upPitchSign ?? 0) > 0
+        case .lookDown:
+            guard let baseline = neutralPitch, let upPitchSign else { return false }
+            let change = pitchDegrees - baseline
+            return abs(change) >= config.minimumVerticalChangeDegrees
+                && change * upPitchSign < 0
+        }
+    }
+
+    private var neutralYaw: Double? {
+        neutralSamples > 0 ? neutralYawTotal / Double(neutralSamples) : nil
+    }
+
+    private var neutralPitch: Double? {
+        neutralSamples > 0 ? neutralPitchTotal / Double(neutralSamples) : nil
+    }
+}
+
+/// requires a continuously valid target before collection resumes
+public struct GazeDatasetSettleGate: Sendable, Equatable {
+    private var targetID: Int?
+    private var validSince: Double?
+
+    public init() {}
+
+    public mutating func isReady(targetID: Int, accepted: Bool,
+                                 now: Double, settleSeconds: Double) -> Bool {
+        if self.targetID != targetID {
+            self.targetID = targetID
+            validSince = nil
+        }
+        guard accepted else {
+            validSince = nil
+            return false
+        }
+        guard let validSince else {
+            self.validSince = now
+            return settleSeconds <= 0
+        }
+        return now - validSince >= settleSeconds
+    }
 }
 
 /// collection gate kept in the core so labelled images cannot bypass it silently
@@ -139,10 +230,17 @@ public enum GazeDatasetAcceptance {
         let degrees = 180.0 / Double.pi
         let worst = max(abs(tracking.headPose.yaw), abs(tracking.headPose.pitch)) * degrees
         guard worst <= config.maximumHeadPoseDegrees else { return .headPose }
-        guard tracking.leftEye.region.width > 1e-6,
-              tracking.leftEye.region.height > 1e-6,
-              tracking.rightEye.region.width > 1e-6,
-              tracking.rightEye.region.height > 1e-6 else { return .degenerateEyes }
+        guard usableImageRegion(tracking.leftEye.region),
+              usableImageRegion(tracking.rightEye.region) else { return .degenerateEyes }
         return nil
+    }
+
+    private static func usableImageRegion(_ region: NormRect) -> Bool {
+        let values = [region.x, region.y, region.width, region.height]
+        guard values.allSatisfy(\.isFinite),
+              region.width > 1e-6, region.height > 1e-6 else { return false }
+        return region.x < 1 && region.y < 1
+            && region.x + region.width > 0
+            && region.y + region.height > 0
     }
 }

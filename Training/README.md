@@ -36,12 +36,30 @@ Run the conversion smoke test first:
 uv run --project Training python Training/train_gaze.py smoke
 ```
 
-Then train against complete held-out sessions:
+The stronger development path starts from Intel Open Model Zoo's
+`gaze-estimation-adas-0002`. Open Model Zoo and PINTO's converted artifact are Apache-2.0; the
+fetcher accepts only the audited archive and model checksums. The weight stays under ignored
+`Training/data/` and is never bundled automatically.
+
+```bash
+uv run --project Training python Training/fetch_pretrained_gaze.py
+uv run --project Training python Training/train_gaze.py smoke \
+  --pretrained-onnx Training/data/gaze_estimation_adas_0002.onnx
+```
+
+- source model: <https://github.com/openvinotoolkit/open_model_zoo/tree/2021.2/models/intel/gaze-estimation-adas-0002>
+- converted artifact and licence: <https://github.com/PINTO0309/PINTO_model_zoo/tree/main/091_gaze-estimation-adas-0002>
+- ONNX SHA-256: `f8f13707401547c7c5e146ba22da1bd6ada00f47ebf347be6d97c5acfaf4c2bd`
+
+Train against explicitly selected complete sessions:
 
 ```bash
 uv run --project Training python Training/train_gaze.py train \
   --data "$HOME/Library/Application Support/Aspectus/gaze-datasets" \
-  --output Training/runs/personal-v1
+  --output Training/runs/personal-v1 \
+  --pretrained-onnx Training/data/gaze_estimation_adas_0002.onnx \
+  --training-session-id TRAINING_SESSION_ID \
+  --validation-session-id UNTOUCHED_VALIDATION_SESSION_ID
 ```
 
 The trainer never creates a row-level random split. It reads only sessions marked `finished`,
@@ -57,3 +75,11 @@ Those gates are deliberately stricter than the correction envelope. Passing them
 integration and hardware latency/quality testing; it does not permit distributing a personalized
 weight file.
 
+Schema-2 sessions start every settle interval only after tracking and the requested head pose are
+continuously valid. The loader excludes the first lens target from older schema-1 sessions because
+those samples could begin while a prompted head turn was still ending. No screen target or valid
+schema-2 lens target is discarded.
+
+After a validation session has influenced architecture or tuning, it is development data rather
+than an honest final test. It can be reassigned explicitly with `--training-session-id`; a newly
+recorded untouched session must then be selected with `--validation-session-id` for the final gate.

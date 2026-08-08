@@ -53,8 +53,8 @@ final class GazeDatasetPlanTests: XCTestCase {
 final class GazeDatasetAcceptanceTests: XCTestCase {
     private func tracking(confidence: Double = 0.9, openness: Double = 1,
                           yawDegrees: Double = 0, poseAvailable: Bool = true,
-                          eyeWidth: Double = 0.08) -> TrackingResult {
-        let eye = EyeObservation(region: .init(x: 0.2, y: 0.2,
+                          eyeX: Double = 0.2, eyeWidth: Double = 0.08) -> TrackingResult {
+        let eye = EyeObservation(region: .init(x: eyeX, y: 0.2,
                                                width: eyeWidth, height: 0.03),
                                  pupilCenter: .init(x: 0.24, y: 0.215),
                                  openness: openness)
@@ -78,5 +78,51 @@ final class GazeDatasetAcceptanceTests: XCTestCase {
                        .headPoseUnavailable)
         XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(yawDegrees: 30)), .headPose)
         XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(eyeWidth: 0)), .degenerateEyes)
+        XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(eyeX: 1.1)), .degenerateEyes)
+        XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(eyeX: .nan)), .degenerateEyes)
+    }
+}
+
+final class GazePosePromptGateTests: XCTestCase {
+    func testHorizontalPromptsRequireRealOppositeMotion() {
+        var gate = GazePosePromptGate()
+        XCTAssertTrue(gate.accepts(.neutral, yawDegrees: 2, pitchDegrees: 8))
+        XCTAssertFalse(gate.accepts(.turnLeft, yawDegrees: 5, pitchDegrees: 8))
+        XCTAssertTrue(gate.accepts(.turnLeft, yawDegrees: -5, pitchDegrees: 8))
+        XCTAssertFalse(gate.accepts(.turnRight, yawDegrees: -6, pitchDegrees: 8))
+        XCTAssertTrue(gate.accepts(.turnRight, yawDegrees: 9, pitchDegrees: 8))
+    }
+
+    func testVerticalPromptsRequireRealOppositeMotion() {
+        var gate = GazePosePromptGate()
+        XCTAssertTrue(gate.accepts(.neutral, yawDegrees: 0, pitchDegrees: 10))
+        XCTAssertFalse(gate.accepts(.lookUp, yawDegrees: 0, pitchDegrees: 13))
+        XCTAssertTrue(gate.accepts(.lookUp, yawDegrees: 0, pitchDegrees: 4))
+        XCTAssertFalse(gate.accepts(.lookDown, yawDegrees: 0, pitchDegrees: 2))
+        XCTAssertTrue(gate.accepts(.lookDown, yawDegrees: 0, pitchDegrees: 17))
+    }
+}
+
+final class GazeDatasetSettleGateTests: XCTestCase {
+    func testRequiresContinuousAcceptanceForTheWholeSettleWindow() {
+        var gate = GazeDatasetSettleGate()
+        XCTAssertFalse(gate.isReady(targetID: 4, accepted: true,
+                                    now: 10, settleSeconds: 2))
+        XCTAssertFalse(gate.isReady(targetID: 4, accepted: false,
+                                    now: 11.5, settleSeconds: 2))
+        XCTAssertFalse(gate.isReady(targetID: 4, accepted: true,
+                                    now: 12, settleSeconds: 2))
+        XCTAssertTrue(gate.isReady(targetID: 4, accepted: true,
+                                   now: 14, settleSeconds: 2))
+    }
+
+    func testChangingTargetStartsANewSettleWindow() {
+        var gate = GazeDatasetSettleGate()
+        XCTAssertFalse(gate.isReady(targetID: 4, accepted: true,
+                                    now: 10, settleSeconds: 1))
+        XCTAssertTrue(gate.isReady(targetID: 4, accepted: true,
+                                   now: 11, settleSeconds: 1))
+        XCTAssertFalse(gate.isReady(targetID: 5, accepted: true,
+                                    now: 11.1, settleSeconds: 1))
     }
 }

@@ -213,6 +213,7 @@ struct GazeDatasetView: View {
         case .eyesClosed: return "open both eyes"
         case .headPoseUnavailable: return "hold your face clearly in view"
         case .headPose: return "turn your head less"
+        case .posePrompt: return "move farther in the requested head direction"
         case .degenerateEyes: return "move a little closer"
         }
     }

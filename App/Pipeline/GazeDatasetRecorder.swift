@@ -77,13 +77,14 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         var targetIndex = 0
         var samplesForTarget = 0
         var totalSamples = 0
-        var targetStartedAt: Double
         var lastCaptureAt = -Double.infinity
         var writeInFlight = false
         var rejection: GazeDatasetRejection?
         var status: Status = .collecting
         var createdAt = Date()
         var startedAtHost: Double
+        var posePromptGate = GazePosePromptGate()
+        var settleGate = GazeDatasetSettleGate()
 
         var isCollecting: Bool { status == .collecting }
     }
@@ -159,7 +160,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
                               geometry: geometry, directory: directory,
                               cameraFormat: cameraFormat,
                               targets: GazeDatasetPlan.targets(for: split),
-                              targetStartedAt: now, startedAtHost: now)
+                              startedAtHost: now)
         try writeMetadata(session, completedAt: nil)
         state.withLock { $0.session = session }
     }
@@ -202,19 +203,32 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         let reservation = state.withLock { state -> Reservation? in
             guard var session = state.session, session.isCollecting,
                   session.targets.indices.contains(session.targetIndex) else { return nil }
+            let target = session.targets[session.targetIndex]
             if let rejection = GazeDatasetAcceptance.rejection(tracking) {
+                _ = session.settleGate.isReady(targetID: target.id, accepted: false,
+                                               now: now, settleSeconds: 0)
                 session.rejection = rejection
                 state.session = session
                 return nil
             }
             guard let tracking else { return nil }
-            let target = session.targets[session.targetIndex]
+            let degrees = 180.0 / Double.pi
+            let poseAccepted = session.posePromptGate.accepts(
+                target.pose,
+                yawDegrees: tracking.headPose.yaw * degrees,
+                pitchDegrees: tracking.headPose.pitch * degrees)
             let previousPose = session.targetIndex > 0
                 ? session.targets[session.targetIndex - 1].pose : nil
-            let settle = previousPose == target.pose
-                ? GazeDatasetPlan.settleSeconds : GazeDatasetPlan.poseTransitionSettleSeconds
-            guard now - session.targetStartedAt >= settle,
-                  now - session.lastCaptureAt >= GazeDatasetPlan.captureIntervalSeconds,
+            let settle = target.kind == .lens ? GazeDatasetPlan.lensSettleSeconds
+                : previousPose == target.pose ? GazeDatasetPlan.settleSeconds
+                : GazeDatasetPlan.poseTransitionSettleSeconds
+            guard session.settleGate.isReady(targetID: target.id, accepted: poseAccepted,
+                                              now: now, settleSeconds: settle) else {
+                session.rejection = poseAccepted ? nil : .posePrompt
+                state.session = session
+                return nil
+            }
+            guard now - session.lastCaptureAt >= GazeDatasetPlan.captureIntervalSeconds,
                   !session.writeInFlight,
                   let angles = session.geometry.angles(for: target) else {
                 state.session = session
@@ -236,7 +250,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         queue.async { [self] in
             do {
                 try write(reservation, frame: frame, tracking: tracking)
-                completeWrite(sessionID: reservation.sessionID, now: HostClock.seconds)
+                completeWrite(sessionID: reservation.sessionID)
             } catch {
                 failWrite(sessionID: reservation.sessionID, message: error.localizedDescription)
                 log.error("gaze dataset write failed: \(error.localizedDescription, privacy: .public)")
@@ -254,7 +268,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         state.withLock { $0.session = nil }
     }
 
-    private func completeWrite(sessionID: String, now: Double) {
+    private func completeWrite(sessionID: String) {
         let completed = state.withLock { state -> Session? in
             guard var session = state.session, session.id == sessionID else { return nil }
             session.writeInFlight = false
@@ -263,7 +277,6 @@ final class GazeDatasetRecorder: @unchecked Sendable {
             if session.samplesForTarget >= GazeDatasetPlan.samplesPerTarget {
                 session.targetIndex += 1
                 session.samplesForTarget = 0
-                session.targetStartedAt = now
             }
             if session.targetIndex >= session.targets.count {
                 session.status = .finished
@@ -297,7 +310,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
 
         let degrees = 180.0 / Double.pi
         let row = [
-            "1", csv(reservation.participantID), csv(reservation.sessionID),
+            "2", csv(reservation.participantID), csv(reservation.sessionID),
             reservation.split.rawValue, "\(reservation.sampleNumber)",
             "\(frame.header.id.value)", fmt(reservation.elapsed),
             "\(reservation.target.id)", reservation.target.kind.rawValue,
@@ -362,7 +375,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         case .cancelled: status = "cancelled"
         case .failed: status = "failed"
         }
-        let metadata = Metadata(schemaVersion: 1, participantID: session.participantID,
+        let metadata = Metadata(schemaVersion: 2, participantID: session.participantID,
                                 sessionID: session.id, split: session.split,
                                 createdAt: session.createdAt, completedAt: completedAt,
                                 status: status, displayGeometry: session.geometry,

@@ -1,7 +1,7 @@
 # Aspectus for macOS — Design (Phase 1)
 
 Reference machine: Apple M3, macOS 26.6 (25G72), Xcode 26.6 (17F113), Swift 6.3.3 (measured).
-Status: phases 1–6 implemented; 202 unit tests green in a release build. The virtual camera is
+Status: phases 1–6 implemented; 206 unit tests green in a release build. The virtual camera is
 verified in three of the six conferencing hosts — Zoom, Google Meet and Microsoft Teams — and
 untested in the other three. See "Measured facts" below for what has actually been run on hardware.
 
@@ -55,13 +55,19 @@ terms restrict use to non-commercial research and prohibit redistribution of its
 Those sources can inform evaluation, but their current public artifacts cannot simply be bundled in
 a commercial app.
 
-The closest licence-clean architecture reference found after the hardware rejection is Intel Open
-Model Zoo's `gaze-estimation-adas-0002`: separate 60 × 60 RGB eye inputs plus three head-pose angles,
-with a three-dimensional gaze output. Its published held-out mean angular error is **6.95°**, already
-larger than this project's 5° p95 gate, so its checkpoint is not a product answer. Its input contract
-does support a smaller shared-eye encoder as the next controlled experiment. The implementation here
-is original, uses no Open Model Zoo code or weights, and predicts yaw/pitch directly for the existing
-`GazeEstimator` seam.
+The closest licence-clean initializer found after the hardware rejection is Intel Open Model Zoo's
+`gaze-estimation-adas-0002`: separate 60 × 60 RGB eye inputs plus three head-pose angles, with a
+three-dimensional gaze output. Its published held-out mean angular error is **6.95°**, already larger
+than this project's 5° p95 gate, so its checkpoint is not a product answer. The Open Model Zoo model
+and PINTO's mechanically converted ONNX artifact are both Apache-2.0. The offline trainer can fetch
+that exact artifact by checksum and personalize it; neither the initializer nor a personalized
+checkpoint is committed or bundled. The app runtime still has no learned model.
+
+On the current development split, the 156,226-parameter original CNN reached **4.24° median / 16.39°
+p95 / 15.14° lens p95** after spatial augmentation. Fine-tuning the 1,880,739-parameter Open Model Zoo
+initializer improved that to **3.70° / 13.55° / 8.78°**, but still failed every export gate. The graph
+does convert to a 3.8 MB FP16 Core ML ML Program and matches PyTorch within 0.0009 in its output vector;
+conversion is therefore not the blocker. Cross-session gaze accuracy is.
 
 - Open Model Zoo model card: <https://docs.openvino.ai/2023.3/omz_models_model_gaze_estimation_adas_0002.html>
 - Open Model Zoo repository and licence: <https://github.com/openvinotoolkit/open_model_zoo>
@@ -204,7 +210,7 @@ preview visible: face tracking 19.2 / 29.2, warp 1.8 / 2.4, processing 45.7 / 61
     earlier and turns it from one observation into four.
   - Note that elapsed time in the CSV is *awake* time: `HostClock` does not advance while the
     machine sleeps, which is why 10.5 hours of wall clock produced 98 minutes of samples.
-- 202 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
+- 206 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
   and reopen, 1€ jitter reduction and bounded-lag tracking, gate hysteresis / angle-limit fallback
   / slew ramp, blink preservation, filter reset on tracking loss and timestamp discontinuity,
   recovery within the 300 ms budget, gaze geometry and warp containment, metrics percentiles,
@@ -322,12 +328,21 @@ correction while collecting, and exposes reveal and permanent-delete actions. Tr
 validation use separate deterministic fixation sessions; the trainer refuses incomplete sessions
 and never manufactures a row-level random split.
 
-The offline trainer is a 53,794-parameter shared-eye CNN with a head-pose input. It exports an
-FP16 Core ML ML Program only after a held-out session clears median ≤ 2°, p95 ≤ 5° and physical-lens
-p95 ≤ 3°. The conversion contract is verified locally as two RGB image inputs plus one head-pose
-tensor, with Core ML and PyTorch agreeing within the smoke-test tolerance. A personalized passing
-model would prove the signal and unlock native integration; it would not be representative or
-redistributable product training data.
+The offline trainer offers a 156,226-parameter shared-eye spatial CNN and checksum-pinned
+personalization of the Apache-2.0 Open Model Zoo initializer above. It exports an FP16 Core ML ML
+Program only after a held-out session clears median ≤ 2°, p95 ≤ 5° and physical-lens p95 ≤ 3°. The
+conversion contract is verified locally as two RGB image inputs plus one head-pose tensor, with
+Core ML and PyTorch agreeing within the smoke-test tolerance. A personalized passing model would
+prove the signal and unlock native integration; it would not be representative product training
+data and must not be redistributed as a general model.
+
+Four 810-sample sessions exposed two collection defects before that experiment. A Vision eye region
+could fall wholly outside the frame and make Core Image abort the session; those frames are now
+rejected before writing. More importantly, pose settling used to start when the target appeared,
+not when the requested head pose became valid. If the turn itself consumed the settle interval, the
+first lens samples were captured while motion was still ending. Schema 2 now requires continuously
+valid pose/tracking for the entire settle window. The trainer excludes only those known-contaminated
+first-lens targets from schema-1 development sessions.
 
 The conservative large-pose path is verified on hardware. In a 112.6 s installed-release run,
 head pose reached 66.8° yaw and 27.7° pitch; 38 sampled intervals named `headPose`, set correction
@@ -397,10 +412,11 @@ Slack and OBS.
 
 ## Known gaps
 
-- **No appearance-model weights have passed the gate yet.** Collection, session-isolated
-  evaluation and Core ML conversion are implemented, but real training and validation sessions
-  still need to be recorded on the reference camera. Until a held-out run passes, the runtime stays
-  on the rejected geometric gaze estimate and cannot claim reliable camera-directed gaze.
+- **No appearance-model weights have passed the gate yet.** Four real sessions are recorded and
+  session-isolated training, evaluation and Core ML conversion are implemented. The best current
+  development result is 3.70° median / 13.55° p95 / 8.78° lens p95, so export remains withheld.
+  Until a new untouched schema-2 session passes, the runtime stays on the rejected geometric gaze
+  estimate and cannot claim reliable camera-directed gaze.
 
 - ~~Output FPS latches at its last value when the window is occluded instead of decaying to zero.~~
   **Fixed and measured.** The meters were only recomputed when an event arrived, so a source that
