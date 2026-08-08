@@ -102,7 +102,7 @@ struct CalibrationView: View {
 
             ZStack {
                 RoundedRectangle(cornerRadius: 12).stroke(.secondary.opacity(0.4), lineWidth: 1)
-                Circle().fill(.tint).frame(width: 20, height: 20)
+                lensGuide
             }
             .frame(height: 120)
 
@@ -152,7 +152,11 @@ struct CalibrationView: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 12)
                     .stroke(.secondary.opacity(0.4), lineWidth: 1)
-                targetDot(progress.target)
+                if progress.target == .center {
+                    lensGuide
+                } else {
+                    targetDot(progress.target)
+                }
             }
             .frame(height: 170)
 
@@ -308,6 +312,19 @@ struct CalibrationView: View {
                 .position(point)
                 .animation(.easeInOut(duration: 0.35), value: target)
         }
+    }
+
+    private var lensGuide: some View {
+        VStack(spacing: 6) {
+            Image(systemName: "arrow.up")
+                .font(.title2.weight(.semibold))
+            Text("look outside this window")
+                .font(.caption.weight(.medium))
+            Text("at the physical camera lens")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .foregroundStyle(.tint)
     }
 
     private func dotPosition(_ target: CalibrationTarget, in size: CGSize) -> CGPoint {

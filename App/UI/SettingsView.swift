@@ -27,20 +27,29 @@ struct SettingsView: View {
             Section {
                 Toggle("Correct gaze", isOn: Binding(get: { controller.correctionEnabled },
                                                      set: { controller.correctionEnabled = $0 }))
-                LabeledContent("Screen-to-lens angle") {
-                    HStack(spacing: 8) {
-                        Slider(value: Binding(get: { controller.redirectDegrees },
-                                              set: { controller.redirectDegrees = $0 }),
-                               in: 0...controller.maxRedirectDegrees)
-                            .accessibilityLabel("Gaze correction amount in degrees")
-                        Text(String(format: "%.0f°", controller.redirectDegrees))
-                            .monospacedDigit().frame(width: 34, alignment: .trailing)
+                if controller.calibration == nil {
+                    LabeledContent("Screen-to-lens angle") {
+                        HStack(spacing: 8) {
+                            Slider(value: Binding(get: { controller.redirectDegrees },
+                                                  set: { controller.redirectDegrees = $0 }),
+                                   in: 0...controller.maxRedirectDegrees)
+                                .accessibilityLabel("Uncalibrated gaze correction amount in degrees")
+                            Text(String(format: "%.0f°", controller.redirectDegrees))
+                                .monospacedDigit().frame(width: 34, alignment: .trailing)
+                        }
                     }
+                    Text("Used only until calibration establishes where the camera lens is relative "
+                         + "to your gaze. The safety gate still refuses anything past "
+                         + "\(Int(controller.maxRedirectDegrees))°.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    LabeledContent("Correction target") {
+                        Text("camera lens").foregroundStyle(.secondary)
+                    }
+                    Text("Calibration already measures gaze relative to the lens, so no additional "
+                         + "screen offset is added.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("How far your eyes sit below the lens when you read the screen. The gate "
-                     + "refuses anything past \(Int(controller.maxRedirectDegrees))°, so this "
-                     + "cannot loosen the safety limit.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("Calibration") {

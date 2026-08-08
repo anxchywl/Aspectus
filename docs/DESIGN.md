@@ -1,7 +1,7 @@
 # Aspectus for macOS — Design (Phase 1)
 
 Reference machine: Apple M3, macOS 26.6 (25G72), Xcode 26.6 (17F113), Swift 6.3.3 (measured).
-Status: phases 1–6 implemented; 193 unit tests green in a release build. The virtual camera is
+Status: phases 1–6 implemented; 194 unit tests green in a release build. The virtual camera is
 verified in three of the six conferencing hosts — Zoom, Google Meet and Microsoft Teams — and
 untested in the other three. See "Measured facts" below for what has actually been run on hardware.
 
@@ -176,7 +176,7 @@ preview visible: face tracking 19.2 / 29.2, warp 1.8 / 2.4, processing 45.7 / 61
     earlier and turns it from one observation into four.
   - Note that elapsed time in the CSV is *awake* time: `HostClock` does not advance while the
     machine sleeps, which is why 10.5 hours of wall clock produced 98 minutes of samples.
-- 193 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
+- 194 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
   and reopen, 1€ jitter reduction and bounded-lag tracking, gate hysteresis / angle-limit fallback
   / slew ramp, blink preservation, filter reset on tracking loss and timestamp discontinuity,
   recovery within the 300 ms budget, gaze geometry and warp containment, metrics percentiles,
@@ -234,13 +234,52 @@ The geometric warp resamples the iris and is stable once filtered, but it cannot
 interaction or iris occlusion, so it degrades visibly at larger redirect angles. It is a working,
 licence-clean baseline behind the `EyeCorrector` seam, not the final quality target.
 
+The correction target previously violated its own coordinate contract after calibration. A
+`GazeEstimate` of zero means the subject is already looking at the lens, and calibration makes the
+estimate lens-relative, but the runtime still added the manual 12° uncalibrated lift to the inverse
+measured pitch. A subject reading roughly 10° below the lens could therefore request about 22° and
+enter the 18° gate instead of asking for the measured 10°. The calibrated path now removes the
+measured yaw and pitch only; the manual lift remains solely as the uncalibrated vertical fallback.
+Unit tests pin both paths.
+
+That review is now reproducible instead of relying on a live impression. Launching with
+`--quality-capture <directory>` records at most 12 paired original/corrected eye crops and a manifest
+whose rows carry the same frame's raw and calibrated gaze, requested angle, gate factor, blend,
+pixel travel and fallback reason. Writes are off the hot path and bounded to one at a time. The
+centre and head-motion calibration steps no longer draw a screen-centre dot while asking the user
+to look at the physical lens; they show an explicit outside-the-window lens guide instead.
+
+The first controlled screen-centre run produced all 12 pairs. Eight samples
+named `angleLimit`; three of those had zero blend and therefore bit-identical original/corrected
+PNGs. Nine pairs changed, three reached full blend, mean blend was 0.546 and mean applied iris
+travel was 2.15 px. The targeting fix recovered full correction in three representative downward
+gaze samples whose new requests were 8.5–15.6°; adding the old 12° term would have asked for
+20.5–27.2° and gated them instead. The later HUD snapshot agreed with the bounded sample: 73 % of
+887 frames had actually been corrected, queue depth was zero and `angleLimit` was the dominant
+fallback.
+
+This explains part of “correction does nothing,” but it is not a quality pass. The changed crops
+prove that the geometric shader moves pixels; at roughly two pixels on average the result is often
+subtle, and the run does not establish that the apparent gaze reaches the lens. The subject wore
+glasses: Vision continued to return both pupil landmarks and the warp ran, but natural preservation
+through the lenses remains an acceptance question for the learned corrector.
+
+A second 12-pair run verified the final 25-column manifest, including head pose, eye openness,
+confidence and landmark age. It also exposed the next blocker. With both eyes open, gaze confidence
+0.76–0.79 and head pitch only +14.8°…+18.7°, calibrated pitch read −20.0°…−49.7°. Every sample hit
+`angleLimit`; 11 had zero blend and bit-identical pairs. The HUD later showed only 5 % of 1,730
+frames corrected, with queue depth zero and the virtual camera still publishing 29 fps. So the
+recorder is proven, and the remaining failure is now localized: the calibrated Vision-landmark
+estimate does not remain physically plausible across a common laptop head posture. Increasing the
+warp strength or the 18° safety limit would hide that estimator error, not fix gaze direction.
+
 The conservative large-pose path is verified on hardware. In a 112.6 s installed-release run,
 head pose reached 66.8° yaw and 27.7° pitch; 38 sampled intervals named `headPose`, set correction
 to passthrough and kept the virtual camera streaming. Returning inside the trusted range restored
 full correction for 55 sampled intervals. Capture/output held 30/29 fps, queue depth stayed zero,
 the app dropped one startup frame and the virtual camera dropped none while sending 3,329 frames.
-This verifies fallback and recovery, not visual naturalness. Glasses and genuinely low illumination
-remain untested because neither physical condition was confirmed during the run.
+This verifies fallback and recovery, not visual naturalness. A later quality capture confirmed
+tracking and warp execution with glasses; genuinely low illumination remains untested.
 
 ### Phase 5: the virtual camera delivers
 
@@ -361,11 +400,11 @@ Slack and OBS.
   raw gaze pitch swung to −34.5°, driving a requested correction of 51.9° that the angle limit
   correctly cut to zero blend. The centred-pupil model has no head-pose term, so head rotation
   leaks directly into the gaze reading.
-  - **Compensation implemented, coefficients not yet measured on hardware.** An uncontrolled run
-    could not identify them: head rotation and eye-in-head rotation are confounded when the eyes
-    move freely, and the correlations came out weak (r = 0.15…0.49) with the *strongest* term being
-    a physically odd cross coupling (head pitch → gaze yaw, r = −0.49). Fitting that would encode
-    incidental behaviour, not geometry.
+  - **Compensation is implemented and fitted, but does not generalize far enough.** The saved
+    hardware fit is small and repeatable (`yawFromYaw +0.280`, `yawFromPitch −0.066`,
+    `pitchFromYaw +0.019`, `pitchFromPitch +0.081`). The final quality capture nevertheless produced
+    calibrated pitch as large as −49.7° at only +18.7° head pitch. The 2D pupil/corner signal plus a
+    global linear pose correction is therefore not a trustworthy gaze command for Phase 3b.
   - The identifiable experiment is a **fixation sweep**: the user holds their gaze on the lens while
     rotating their head, so true gaze is zero on every sample and the raw reading is pure
     contamination. This is now a sixth calibration step, fitting a 2×2 linear map

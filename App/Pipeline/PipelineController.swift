@@ -127,8 +127,8 @@ final class PipelineController: ObservableObject {
 
     private let correctionSwitch = OSAllocatedUnfairLock(initialState: true)
 
-    /// screen-to-lens angle in degrees, the part of the correction that is not visible in the
-    /// image; clamped to the gate's trusted angle so a setting can never widen the safety limit
+    /// fallback screen-to-lens lift for an uncalibrated install; a calibration already expresses
+    /// gaze relative to the lens, so adding this again would count the same eye rotation twice
     var redirectDegrees: Double {
         get { redirectStore.withLock { $0 } }
         set {
@@ -186,6 +186,7 @@ final class PipelineController: ObservableObject {
     private var consumerTask: Task<Void, Never>?
     private var statsTimer: Timer?
     private let benchmark = BenchmarkRecorder.fromLaunchArguments()
+    private let qualityRecorder = CorrectionQualityRecorder.fromLaunchArguments()
 
     private let log = Logger(subsystem: "com.aspectus.app", category: "pipeline")
     private var recovery = CaptureRecovery()
@@ -544,6 +545,7 @@ final class PipelineController: ObservableObject {
 
         let pipelineMetrics = self.pipelineMetrics
         let diagnostics = self.diagnostics
+        let qualityRecorder = self.qualityRecorder
         let activeCalibration = self.activeCalibration
         let sessionStore = self.sessionStore
         let virtualCamera = self.virtualCamera
@@ -590,11 +592,10 @@ final class PipelineController: ObservableObject {
                 // cancels real correction, so pitch falls back to the configured screen-to-lens
                 // angle alone. a calibration measures the bias and removes it, which is what makes
                 // the closed-loop vertical term trustworthy again
-                let usePitch = calibration != nil
                 let request = gaze.map {
-                    CorrectionRequest(yawOffset: -$0.yaw,
-                                      pitchOffset: usePitch ? -$0.pitch + redirect : redirect,
-                                      strength: 1)
+                    CorrectionRequest.aimingAtLens(from: $0,
+                                                   calibrated: calibration != nil,
+                                                   uncalibratedPitchOffset: redirect)
                 }
 
                 // the gate is updated every frame, including fallback frames, so the blend always
@@ -640,7 +641,7 @@ final class PipelineController: ObservableObject {
                                                    correctionApplied: correctionApplied,
                                                    imageAspect: aspect, tuning: warpTuning)
                 let degrees = 180.0 / Double.pi
-                diagnostics.record(GazeSample(
+                let gazeSample = GazeSample(
                     frameID: frame.header.id,
                     left: applied.map { EyeSample($0.leftEye) },
                     right: applied.map { EyeSample($0.rightEye) },
@@ -661,7 +662,12 @@ final class PipelineController: ObservableObject {
                     blendStrength: weight,
                     correctionAgeMs: ageMs,
                     irisTravelPixels: travelPixels,
-                    fallback: fallback))
+                    fallback: fallback)
+                diagnostics.record(gazeSample)
+                if let applied {
+                    qualityRecorder?.record(original: frame, corrected: corrected,
+                                            tracking: applied, sample: gazeSample)
+                }
 
                 // before mirroring, which is a display choice and must not reach a host
                 virtualCamera.publish(corrected.pixelBuffer, timing: frame.header.timing)

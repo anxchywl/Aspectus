@@ -14,8 +14,9 @@ CoreMediaIO camera extension. No Electron, no Python runtime.
 > **In development.** The pipeline runs end to end and the virtual camera works in Zoom, Google Meet
 > and Microsoft Teams, but the other three host apps are untested and correction quality is a
 > geometric baseline, not the target.
-> There are no releases yet, and building it yourself needs an Apple Developer ID — macOS will not
-> activate an unsigned camera extension. See [Status](#status).
+> A signed, notarized [0.1.0 release](https://github.com/anxchywl/Aspectus/releases/tag/v0.1.0) is
+> available for Apple Silicon. Building the virtual camera yourself still needs an Apple Developer
+> ID — macOS will not activate an unsigned camera extension. See [Status](#status).
 
 ## What it does
 

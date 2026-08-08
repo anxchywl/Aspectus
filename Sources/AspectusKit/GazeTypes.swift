@@ -108,6 +108,21 @@ public struct CorrectionRequest: Sendable {
     public init(yawOffset: Double, pitchOffset: Double, strength: Double) {
         self.yawOffset = yawOffset; self.pitchOffset = pitchOffset; self.strength = strength
     }
+
+    /// aims a gaze estimate at the lens without counting the screen offset twice
+    ///
+    /// a calibrated estimate is already lens-relative, so both measured axes are simply removed
+    /// without calibration the vertical anatomical bias is unknown, so only yaw is measured and
+    /// the explicit screen-to-lens lift supplies pitch
+    public static func aimingAtLens(from gaze: GazeEstimate,
+                                    calibrated: Bool,
+                                    uncalibratedPitchOffset: Double,
+                                    strength: Double = 1) -> CorrectionRequest {
+        CorrectionRequest(yawOffset: -gaze.yaw,
+                          pitchOffset: calibrated ? -gaze.pitch : uncalibratedPitchOffset,
+                          strength: strength)
+    }
+
     public var magnitudeDegrees: Double {
         (Foundation.sqrt(yawOffset * yawOffset + pitchOffset * pitchOffset)) * 180.0 / .pi
     }

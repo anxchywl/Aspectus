@@ -282,17 +282,24 @@ final class GazeStalenessTests: XCTestCase {
     }
 }
 
-final class CameraToScreenOffsetTests: XCTestCase {
-    // the screen-to-lens angle is not visible in the image, so it is added on top of the measured
-    // gaze rather than being something the estimator could ever recover
-    func testRedirectAddsToTheMeasuredGaze() {
-        let redirect = 12 * toRadians
-        let tracking = face(dy: 0.002)
-        let gaze = GazeGeometry.estimate(tracking, imageAspect: aspect)!
-        let request = CorrectionRequest(yawOffset: -gaze.yaw,
-                                        pitchOffset: -gaze.pitch + redirect, strength: 1)
-        XCTAssertGreaterThan(request.pitchOffset, redirect,
-                             "looking below the lens must ask for more lift than the offset alone")
+final class LensTargetingTests: XCTestCase {
+    func testCalibratedGazeIsRemovedWithoutAddingTheFallbackOffset() {
+        let gaze = GazeEstimate(yaw: 4 * toRadians, pitch: -10 * toRadians, confidence: 1)
+        let request = CorrectionRequest.aimingAtLens(from: gaze, calibrated: true,
+                                                     uncalibratedPitchOffset: 12 * toRadians)
+
+        XCTAssertEqual(request.yawOffset, -4 * toRadians, accuracy: 1e-12)
+        XCTAssertEqual(request.pitchOffset, 10 * toRadians, accuracy: 1e-12)
+        XCTAssertEqual(request.magnitudeDegrees, hypot(4, 10), accuracy: 1e-12)
+    }
+
+    func testUncalibratedGazeUsesTheExplicitPitchOffset() {
+        let gaze = GazeEstimate(yaw: -3 * toRadians, pitch: -10 * toRadians, confidence: 1)
+        let request = CorrectionRequest.aimingAtLens(from: gaze, calibrated: false,
+                                                     uncalibratedPitchOffset: 12 * toRadians)
+
+        XCTAssertEqual(request.yawOffset, 3 * toRadians, accuracy: 1e-12)
+        XCTAssertEqual(request.pitchOffset, 12 * toRadians, accuracy: 1e-12)
     }
 
     func testRedirectAloneStillProducesVisibleTravel() {

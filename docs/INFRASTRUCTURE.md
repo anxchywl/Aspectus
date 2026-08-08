@@ -17,7 +17,7 @@ The split is what keeps the pipeline core testable without a camera, a GUI or a 
 generate`; never edit the project file.
 
 ```bash
-swift test                  # 181 unit tests, no hardware
+swift test                  # 194 unit tests, no hardware
 swift build -c release      # the core alone
 xcodegen generate           # after any project.yml change
 ```
@@ -147,3 +147,21 @@ stats timer:
 
 Every measurement quoted in [DESIGN.md](./DESIGN.md) comes from a file produced this way. Benchmarks
 are taken from release builds only.
+
+Correction quality has a separate, explicitly enabled recorder because visual evidence contains
+images rather than only metrics:
+
+```bash
+Aspectus.app/Contents/MacOS/Aspectus \
+  --quality-capture /tmp/aspectus-screen-center \
+  --quality-label screen-center
+```
+
+It writes at most 12 paired original/corrected eye crops, 0.75 seconds apart, plus `manifest.csv`
+with the raw and calibrated gaze, requested correction, gate state, blend and iris travel for the
+same frame, plus head pose, eye openness, confidence and landmark age. Only one background write may
+be active, so the recorder cannot queue frames or weaken the single-frame pipeline invariant. Normal
+launches construct no recorder and pay no cost.
+
+These crops are biometric imagery. They stay in the directory supplied on the command line; do not
+commit or share them unless the subject has explicitly agreed.
