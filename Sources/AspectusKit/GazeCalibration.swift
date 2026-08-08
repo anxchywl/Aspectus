@@ -88,7 +88,8 @@ public struct CalibrationSample: Codable, Sendable, Equatable {
 /// definition. gain needs the true angle of the off-axis targets, which needs display geometry and
 /// a viewing distance, so it is fitted only when that geometry is supplied and pinned to 1 otherwise
 public struct GazeCalibration: Codable, Sendable, Equatable {
-    public static let currentVersion = 2
+    public static let currentVersion = 3
+    public static let minimumSupportedVersion = 2
 
     public var version: Int
     public var yawOffsetDegrees: Double
@@ -107,6 +108,10 @@ public struct GazeCalibration: Codable, Sendable, Equatable {
     public var pitchGainFitted: Bool?
     /// nil when the head-motion step was skipped, which means no compensation at all
     public var headCoupling: HeadCoupling?
+    /// the head pose at the lens target, so legacy coupling is subtracted relative to the pose
+    /// where the neutral eye reading was measured rather than relative to an invented zero pose
+    public var headReferenceYawDegrees: Double?
+    public var headReferencePitchDegrees: Double?
 
     public init(version: Int = GazeCalibration.currentVersion,
                 yawOffsetDegrees: Double,
@@ -121,7 +126,9 @@ public struct GazeCalibration: Codable, Sendable, Equatable {
                 gainFitted: Bool? = nil,
                 yawGainFitted: Bool? = nil,
                 pitchGainFitted: Bool? = nil,
-                headCoupling: HeadCoupling? = nil) {
+                headCoupling: HeadCoupling? = nil,
+                headReferenceYawDegrees: Double? = nil,
+                headReferencePitchDegrees: Double? = nil) {
         self.version = version
         self.yawOffsetDegrees = yawOffsetDegrees
         self.pitchOffsetDegrees = pitchOffsetDegrees
@@ -136,6 +143,8 @@ public struct GazeCalibration: Codable, Sendable, Equatable {
         self.yawGainFitted = yawGainFitted
         self.pitchGainFitted = pitchGainFitted
         self.headCoupling = headCoupling
+        self.headReferenceYawDegrees = headReferenceYawDegrees
+        self.headReferencePitchDegrees = headReferencePitchDegrees
     }
 
     /// raw → remove head contamination → remove the neutral bias → scale to true angles
@@ -151,8 +160,11 @@ public struct GazeCalibration: Codable, Sendable, Equatable {
         var pitchDegrees = gaze.pitch / toRadians
 
         if headPoseAvailable, let headCoupling {
-            let contribution = headCoupling.contribution(headYawDegrees: headYawDegrees,
-                                                         headPitchDegrees: headPitchDegrees)
+            let referenceYaw = headReferenceYawDegrees ?? 0
+            let referencePitch = headReferencePitchDegrees ?? 0
+            let contribution = headCoupling.contribution(
+                headYawDegrees: headYawDegrees - referenceYaw,
+                headPitchDegrees: headPitchDegrees - referencePitch)
             yawDegrees -= contribution.yaw
             pitchDegrees -= contribution.pitch
         }
@@ -165,7 +177,9 @@ public struct GazeCalibration: Codable, Sendable, Equatable {
     /// a file written by a future build, or one whose numbers are physically implausible, must be
     /// ignored rather than silently steering correction with nonsense
     public var isUsable: Bool {
-        guard version == Self.currentVersion else { return false }
+        guard version >= Self.minimumSupportedVersion, version <= Self.currentVersion else {
+            return false
+        }
         let finite = [yawOffsetDegrees, pitchOffsetDegrees, yawGain, pitchGain].allSatisfy(\.isFinite)
         return finite
             && abs(yawOffsetDegrees) <= Self.maxPlausibleOffsetDegrees
@@ -237,6 +251,8 @@ public enum CalibrationFit {
         // it sets the neutral baseline
         let yawOffset = mean(.center, \.yawDegrees)
         let pitchOffset = mean(.center, \.pitchDegrees)
+        let headReferenceYaw = mean(.center, \.headYawDegrees)
+        let headReferencePitch = mean(.center, \.headPitchDegrees)
 
         // slope through the origin on the offset-corrected readings: gain = Σ(true·measured)/Σ(measured²)
         //
@@ -290,7 +306,9 @@ public enum CalibrationFit {
                                           gainFitted: fitted,
                                           yawGainFitted: yawFitted,
                                           pitchGainFitted: pitchFitted,
-                                          headCoupling: headCoupling)
+                                          headCoupling: headCoupling,
+                                          headReferenceYawDegrees: headReferenceYaw,
+                                          headReferencePitchDegrees: headReferencePitch)
         guard calibration.isUsable else {
             throw Failure.implausibleOffset(yawDegrees: yawOffset, pitchDegrees: pitchOffset)
         }

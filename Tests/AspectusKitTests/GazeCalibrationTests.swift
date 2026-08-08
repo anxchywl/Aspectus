@@ -79,6 +79,11 @@ final class GazeCalibrationModelTests: XCTestCase {
         XCTAssertFalse(c.isUsable, "a file from a newer build must be ignored, not guessed at")
     }
 
+    func testVersionTwoCalibrationRemainsUsableDuringMigration() {
+        XCTAssertTrue(GazeCalibration(version: 2, yawOffsetDegrees: 0,
+                                      pitchOffsetDegrees: 0).isUsable)
+    }
+
     func testApertureRelativeCalibrationIsRejected() {
         let c = GazeCalibration(version: 1, yawOffsetDegrees: 0, pitchOffsetDegrees: 0)
         XCTAssertFalse(c.isUsable,
@@ -715,6 +720,21 @@ final class HeadCouplingTests: XCTestCase {
         let out = c.apply(raw, headYawDegrees: 20, headPitchDegrees: 10, headPoseAvailable: true)
         XCTAssertEqual(out.yaw, 0, accuracy: 1e-9)
         XCTAssertEqual(out.pitch, 0, accuracy: 1e-9)
+    }
+
+    func testApplyMeasuresHeadContributionRelativeToTheLensPose() {
+        let coupling = HeadCoupling(yawFromYaw: 0.3, yawFromPitch: -0.1,
+                                    pitchFromYaw: 0.05, pitchFromPitch: 0.4)
+        let c = GazeCalibration(yawOffsetDegrees: 2, pitchOffsetDegrees: 5,
+                                headCoupling: coupling,
+                                headReferenceYawDegrees: 4,
+                                headReferencePitchDegrees: 10)
+        let raw = GazeEstimate(yaw: 2 * toRadians, pitch: 5 * toRadians, confidence: 1)
+        let out = c.apply(raw, headYawDegrees: 4, headPitchDegrees: 10,
+                          headPoseAvailable: true)
+        XCTAssertEqual(out.yaw, 0, accuracy: 1e-12)
+        XCTAssertEqual(out.pitch, 0, accuracy: 1e-12,
+                       "the centre target must stay neutral at the pose where it was measured")
     }
 
     func testCompensationIsSkippedWhenPoseIsUnavailable() {

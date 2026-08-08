@@ -29,8 +29,8 @@ struct CalibrationView: View {
         VStack(spacing: 16) {
             Text("Calibrate gaze").font(.title2.weight(.semibold))
             Text("""
-                 Five short steps following a dot, then one where you turn your head. Keep your \
-                 head still for the first five and move only your eyes.
+                 Five short steps looking at the camera and display edges, then one where you turn \
+                 your head. Keep your head still for the first five and move only your eyes.
 
                  Aspectus measures how your eyes read relative to your camera and stores the result \
                  on this Mac. Only angles are saved — never any image of you — and nothing is sent \
@@ -152,11 +152,7 @@ struct CalibrationView: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 12)
                     .stroke(.secondary.opacity(0.4), lineWidth: 1)
-                if progress.target == .center {
-                    lensGuide
-                } else {
-                    targetDot(progress.target)
-                }
+                targetGuide(progress.target)
             }
             .frame(height: 170)
 
@@ -229,7 +225,6 @@ struct CalibrationView: View {
                     .font(.callout).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
-                // failed runs are not saved, so show the raw offsets needed to diagnose them
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(CalibrationTarget.allCases, id: \.self) { target in
                         line(target.rawValue, means[target].map {
@@ -243,7 +238,8 @@ struct CalibrationView: View {
                     }
                 }
                 .font(.caption.monospaced())
-                Text("Nothing was saved. Correction keeps using the fixed angle.")
+                Text("The previous calibration remains active. This attempt's angles were saved "
+                     + "locally for diagnosis.")
                     .font(.caption).foregroundStyle(.secondary)
             case .cancelled:
                 Image(systemName: "xmark.circle.fill")
@@ -303,14 +299,21 @@ struct CalibrationView: View {
         }
     }
 
-    private func targetDot(_ target: CalibrationTarget) -> some View {
-        GeometryReader { geo in
-            let point = dotPosition(target, in: geo.size)
-            Circle()
-                .fill(.tint)
-                .frame(width: 20, height: 20)
-                .position(point)
-                .animation(.easeInOut(duration: 0.35), value: target)
+    @ViewBuilder
+    private func targetGuide(_ target: CalibrationTarget) -> some View {
+        if target == .center {
+            lensGuide
+        } else {
+            VStack(spacing: 6) {
+                Image(systemName: edgeSymbol(target))
+                    .font(.title2.weight(.semibold))
+                Text("look outside this window")
+                    .font(.caption.weight(.medium))
+                Text(edgeLabel(target))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .foregroundStyle(.tint)
         }
     }
 
@@ -327,14 +330,22 @@ struct CalibrationView: View {
         .foregroundStyle(.tint)
     }
 
-    private func dotPosition(_ target: CalibrationTarget, in size: CGSize) -> CGPoint {
-        let inset = 22.0
+    private func edgeSymbol(_ target: CalibrationTarget) -> String {
         switch target {
-        case .center: return CGPoint(x: size.width / 2, y: size.height / 2)
-        case .up: return CGPoint(x: size.width / 2, y: inset)
-        case .down: return CGPoint(x: size.width / 2, y: size.height - inset)
-        case .left: return CGPoint(x: inset, y: size.height / 2)
-        case .right: return CGPoint(x: size.width - inset, y: size.height / 2)
+        case .center, .up: return "arrow.up"
+        case .down: return "arrow.down"
+        case .left: return "arrow.left"
+        case .right: return "arrow.right"
+        }
+    }
+
+    private func edgeLabel(_ target: CalibrationTarget) -> String {
+        switch target {
+        case .center: return "at the physical camera lens"
+        case .up: return "just above the physical camera lens"
+        case .down: return "at the physical bottom edge of the display"
+        case .left: return "at the physical left edge of the display"
+        case .right: return "at the physical right edge of the display"
         }
     }
 

@@ -32,9 +32,10 @@ final class PipelineController: ObservableObject {
 
     @Published var correctorName: String = "—"
 
-    /// no learned model is in the correction path, so there is no version to report; stated
-    /// explicitly rather than left blank, which would read as "not wired up yet"
-    let modelVersion = "n/a — geometric warp"
+    var modelVersion: String {
+        calibration.map { "gaze: geometric calibration v\($0.version)" }
+            ?? "n/a — geometric gaze"
+    }
 
     /// every gaze number the HUD shows, sampled on the stats timer from the detached loop's
     /// collector; angles are signed so a systematic bias is visible instead of being hidden by a
@@ -435,15 +436,31 @@ final class PipelineController: ObservableObject {
         do {
             let geometry = DisplayGeometry.geometry(viewingDistanceMM: viewingDistanceMM)
             let fitted = try session.fit(geometry: geometry)
-            try storage.save(.init(calibration: fitted, samples: session.samples))
+            try storage.save(.init(calibration: fitted, samples: session.samples,
+                                   headMotionSamples: session.headMotionSamples))
             calibration = fitted
             activeCalibration.withLock { $0 = fitted }
             calibrationResult = .succeeded(fitted)
         } catch let failure as CalibrationFit.Failure {
-            calibrationResult = .failed(failure.description, means: means)
+            recordFailedCalibration(session, message: failure.description, means: means)
         } catch {
             calibrationResult = .failed("could not save the calibration: \(error.localizedDescription)",
                                         means: means)
+        }
+    }
+
+    private func recordFailedCalibration(_ session: CalibrationSession,
+                                         message: String,
+                                         means: [CalibrationTarget: CalibrationSession.TargetMeans]) {
+        do {
+            try storage.saveAttempt(samples: session.samples,
+                                    headMotionSamples: session.headMotionSamples,
+                                    failure: message)
+            calibrationResult = .failed(message, means: means)
+        } catch {
+            calibrationResult = .failed(
+                "\(message)\nThe diagnostic angles could not be saved: \(error.localizedDescription)",
+                means: means)
         }
     }
 

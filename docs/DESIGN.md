@@ -1,7 +1,7 @@
 # Aspectus for macOS — Design (Phase 1)
 
 Reference machine: Apple M3, macOS 26.6 (25G72), Xcode 26.6 (17F113), Swift 6.3.3 (measured).
-Status: phases 1–6 implemented; 194 unit tests green in a release build. The virtual camera is
+Status: phases 1–6 implemented; 196 unit tests green in a release build. The virtual camera is
 verified in three of the six conferencing hosts — Zoom, Google Meet and Microsoft Teams — and
 untested in the other three. See "Measured facts" below for what has actually been run on hardware.
 
@@ -13,7 +13,7 @@ Shortlist of four, judged on reuse value — not stars, not README benchmarks.
 |---|-----------|----------|-------|------------------------------|-------------|--------------------------|------------------------|---------------------|
 | 1 | **chihfanhsu/gaze_correction** ("Look at me!", ACM TOMM 2019) | Warping CNN: predicts a per-pixel flow field over the eye patch, bilinear-resamples the *original* pixels | The **method** and reference architecture; small net, ANE-friendly conv stack | High — conv-only + a grid-sample op; convertible via coremltools | Low (TF1.8, ~2019) | **BSD-3** © 2019 Chih-Fan Hsu (file is named `LICENSES`, so GitHub reports "no licence"); **weights: train-your-own** | Medium — reimplement/convert; must add our own sampler | TF1.8, TCP demo, needs calibration; weights not shipped |
 | 2 | **Apple Vision** (`VNDetectFaceLandmarks`, rev 3) | 76-point landmarks **incl. pupils** + face pose, on-device | Tracking stage wholesale — face bbox, eye landmarks, pupil centers, roll/yaw/pitch | Native, runs on ANE in ms, zero conversion, no telemetry | Apple-maintained | Apple SDK | Low | 2D pupil only (no true 3D gaze vector); needs a gaze head or geometric estimate |
-| 3 | **L2CS-Net / MPIIGaze-style estimator** | Appearance-based gaze *direction* regressor | Optional gaze-angle head to drive correction magnitude | Small ResNet → Core ML convertible | Moderate | Research (MIT-ish); check weights | Medium | Estimates direction, does **not** redirect; extra model in budget |
+| 3 | **L2CS-Net-style estimator** | Appearance-based gaze *direction* regressor | Required gaze-angle head to drive correction magnitude | ResNet → Core ML convertible; mobile variants need measurement | Moderate | L2CS code MIT; linked weight redistribution rights not established | Medium | Published Gaze360 error is large relative to the 18° correction envelope |
 | 4 | **RTGaze (2025) / GazeNeRF / 3D-eyeball** | Full-face novel-view / 3D-aware synthesis | Reference for quality ceiling only | Poor for v1 — 61 ms/frame reported, heavy | Active research | Research | High | Too slow for 60 FPS / <20 ms; hallucinates whole face → identity/glasses/temporal risk |
 
 ## 2. Selected foundation & rationale
@@ -41,9 +41,24 @@ unclear model" case, so pretrained weights are out of scope and any learned warp
 trained from data we can account for.
 
 Apple Vision supplies primary-face + eye + **pupil** landmarks and head pose on the ANE for
-near-zero cost, removing dlib/MediaPipe. Gaze magnitude for correction is derived geometrically
-from pupil-vs-eye-center + head pose first; a small Core ML gaze head (candidate 3) is added
-**only if** the prototype shows the geometric estimate is insufficient.
+near-zero cost, removing dlib/MediaPipe. Hardware calibration has now shown that pupil-vs-eye
+geometry is insufficient, especially on the vertical axis. A small appearance-based gaze model is
+therefore required before the app can claim real lens-directed correction. Core ML is only the
+runtime container; the project still needs weights whose accuracy and redistribution rights are
+acceptable.
+
+The currently obvious public checkpoints do not clear that bar. L2CS-Net's repository is MIT, but
+its pretrained files are external to that repository and no separate redistribution grant was found;
+its reported Gaze360 error is 10.41°. MobileGaze likewise links external Gaze360-trained weights and
+reports 12.58–13.07° for its small models. MPIIGaze is explicitly CC BY-NC-SA, while ETH-XGaze's
+terms restrict use to non-commercial research and prohibit redistribution of its data and models.
+Those sources can inform evaluation, but their current public artifacts cannot simply be bundled in
+a commercial app.
+
+- L2CS-Net: <https://github.com/Ahmednull/L2CS-Net>
+- MobileGaze: <https://github.com/yakhyo/gaze-estimation>
+- MPIIGaze terms: <https://www.mpi-inf.mpg.de/departments/computer-vision-and-machine-learning/research/gaze-based-human-computer-interaction/appearance-based-gaze-estimation-in-the-wild>
+- ETH-XGaze terms: <https://xgaze.ait.ethz.ch/>
 
 ## 3. Rejected alternatives
 - **Full-face synthesis (RTGaze/GazeNeRF/3D-eyeball, cand. 4):** too slow, and whole-face
@@ -176,7 +191,7 @@ preview visible: face tracking 19.2 / 29.2, warp 1.8 / 2.4, processing 45.7 / 61
     earlier and turns it from one observation into four.
   - Note that elapsed time in the CSV is *awake* time: `HostClock` does not advance while the
     machine sleeps, which is why 10.5 hours of wall clock produced 98 minutes of samples.
-- 194 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
+- 196 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
   and reopen, 1€ jitter reduction and bounded-lag tracking, gate hysteresis / angle-limit fallback
   / slew ramp, blink preservation, filter reset on tracking loss and timestamp discontinuity,
   recovery within the 300 ms budget, gaze geometry and warp containment, metrics percentiles,
@@ -268,10 +283,24 @@ A second 12-pair run verified the final 25-column manifest, including head pose,
 confidence and landmark age. It also exposed the next blocker. With both eyes open, gaze confidence
 0.76–0.79 and head pitch only +14.8°…+18.7°, calibrated pitch read −20.0°…−49.7°. Every sample hit
 `angleLimit`; 11 had zero blend and bit-identical pairs. The HUD later showed only 5 % of 1,730
-frames corrected, with queue depth zero and the virtual camera still publishing 29 fps. So the
-recorder is proven, and the remaining failure is now localized: the calibrated Vision-landmark
-estimate does not remain physically plausible across a common laptop head posture. Increasing the
-warp strength or the 18° safety limit would hide that estimator error, not fix gaze direction.
+frames corrected, with queue depth zero and the virtual camera still publishing 29 fps. That result
+rejects the sequential global head-coupling fit as the final gaze estimator.
+
+A personalized joint fit over raw gaze and head pose was then prototyped and tested, but rejected
+before shipping. Four real-camera fits failed its quality gate: yaw RMSE **1.0–1.8°**, pitch RMSE
+**4.2–6.3°**, and lens-fixation RMSE **5.5–6.5°**. Polynomial and local-neighbour variants did not
+recover a trustworthy pitch signal either. The failure is evidence about the input, not a reason to
+loosen the bounds.
+
+The calibration UI had also been drawing off-axis dots inside its sheet while fitting against the
+physical display edges. After replacing those dots with explicit directions to the real lens and
+display edges, a third hardware run still measured only **1.6°** between up and down and **3.1°**
+from lens to bottom, versus **25.4°** horizontally. Mapping 3.1° to the approximately 21° physical
+bottom target would require about **6.8×** vertical gain, beyond the existing safe maximum of 4×
+and large enough to amplify neutral noise into the previously observed 30–50° false corrections.
+The joint landmark regressor is therefore not in the product. The remaining Phase 3 quality blocker
+is an appearance-based gaze estimator trained from data the project may legally use and shipped
+with explicitly redistributable weights.
 
 The conservative large-pose path is verified on hardware. In a 112.6 s installed-release run,
 head pose reached 66.8° yaw and 27.7° pitch; 38 sampled intervals named `headPose`, set correction
@@ -404,11 +433,15 @@ Slack and OBS.
     hardware fit is small and repeatable (`yawFromYaw +0.280`, `yawFromPitch −0.066`,
     `pitchFromYaw +0.019`, `pitchFromPitch +0.081`). The final quality capture nevertheless produced
     calibrated pitch as large as −49.7° at only +18.7° head pitch. The 2D pupil/corner signal plus a
-    global linear pose correction is therefore not a trustworthy gaze command for Phase 3b.
+    global linear pose correction is therefore not a trustworthy gaze command for the Phase 3 hard
+    gate.
+  - **A joint personalized landmark estimator was tested and rejected.** Its pitch and lens RMSE
+    remained above the quality gate on four hardware fits. It is not present in the runtime. Version
+    3 instead stores the centre target's head pose, fixing the old assumption that neutral gaze was
+    measured at a zero head pose; version-2 files remain readable during migration.
   - The identifiable experiment is a **fixation sweep**: the user holds their gaze on the lens while
     rotating their head, so true gaze is zero on every sample and the raw reading is pure
-    contamination. This is now a sixth calibration step, fitting a 2×2 linear map
-    (`HeadCoupling`) by least squares on the mean-centred head angles.
+    contamination. This is the sixth calibration step and fits the 2×2 `HeadCoupling`.
   - Every sign is measured rather than assumed, which matters because Vision reports **pitch
     positive when nodding down** while this codebase treats **positive pitch as looking up**, and
     yaw's documented "counterclockwise" is ambiguous for a face. The fit refuses collinear head
@@ -435,7 +468,8 @@ Slack and OBS.
     the corner signal smoothed by the same 1€ filter as the other landmarks. A missing corner falls
     back to the old aperture centre rather than making the frame unusable.
   - Calibration schema version **2** prevents a version-1 fit, learned from the incompatible
-    aperture-relative signal, from being applied silently.
+    aperture-relative signal, from being applied silently. Version **3** adds the centre head-pose
+    reference and keeps version 2 readable during migration.
   - Two calibrations after the change passed at **10.1° / 29.6°** and **11.8° / 33.1°** vertical /
     horizontal separation. The saved 300-sample fit has neutral bias yaw −0.79°, pitch +8.92°,
     `yawGain ×1.00`, `pitchGain ×2.69`, and 60 accepted samples at every target.
@@ -448,8 +482,11 @@ Slack and OBS.
   neutral raw eye reading; that calibration was rejected and overwritten. The repeat produced
   `yawFromYaw +0.280`, `yawFromPitch −0.066`, `pitchFromYaw +0.019`, `pitchFromPitch +0.081`, close
   to the earlier independent fit (+0.192, −0.115, −0.004, +0.055). The sweep remains skippable.
-- Calibration samples retain the raw per-eye offsets, and failed calibration sheets show per-target
-  means, so future fit failures remain diagnosable even though unsuccessful runs are not saved.
+- Calibration samples retain the raw per-eye offsets, and stored files also retain the derived
+  head-sweep angles. Failed calibration sheets show per-target means and their angle-only samples
+  are stored under `calibration-attempts/`, so fit failures remain diagnosable. Every successful
+  overwrite first copies the prior file into `calibration-backups/`, so a new run cannot silently
+  destroy the only evidence from the old one.
 - The apparent 15° runtime head-gate anomaly was a comparison of different limits, not a gate
   failure: fixation calibration uses 15°, while normal estimation uses the intended 25° limit.
 - Pupil source remained `visionLandmark` for both eyes on 100 % of the measured frames, one point
