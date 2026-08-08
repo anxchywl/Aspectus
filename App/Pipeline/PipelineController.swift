@@ -67,6 +67,10 @@ final class PipelineController: ObservableObject {
     /// the outcome of the last completed or failed calibration, for user-visible feedback
     @Published private(set) var calibrationResult: CalibrationOutcome?
 
+    /// non-nil only after an explicit model-data collection action
+    @Published private(set) var datasetProgress: GazeDatasetRecorder.Snapshot?
+    @Published private(set) var datasetError: String?
+
     struct CalibrationProgress: Equatable {
         var target: CalibrationTarget
         var targetProgress: Double
@@ -151,6 +155,7 @@ final class PipelineController: ObservableObject {
     /// the running calibration flow, owned by the lock because the loop feeds it and the UI reads it
     private let sessionStore = OSAllocatedUnfairLock<CalibrationSession?>(initialState: nil)
     private let storage = CalibrationStore()
+    private let datasetRecorder = GazeDatasetRecorder()
 
     /// supplied by the user because macOS gives no camera field of view, so it cannot be measured;
     /// the fitted gain is only as good as this number and the UI says so
@@ -158,6 +163,7 @@ final class PipelineController: ObservableObject {
         didSet { preferences.viewingDistanceMM = viewingDistanceMM }
     }
     private var calibrationTimer: Timer?
+    private var datasetTimer: Timer?
 
     private let preferences = Preferences()
 
@@ -368,7 +374,7 @@ final class PipelineController: ObservableObject {
 
     /// only ever called from an explicit user action, so calibration can never start silently
     func startCalibration() {
-        guard isRunning else { return }
+        guard isRunning, !datasetRecorder.isCollecting else { return }
         calibrationResult = nil
         sessionStore.withLock { $0 = CalibrationSession() }
         calibrationProgress = CalibrationProgress(target: CalibrationTarget.allCases[0],
@@ -464,6 +470,58 @@ final class PipelineController: ObservableObject {
         }
     }
 
+    // MARK: - gaze model dataset
+
+    func startGazeDataset(_ split: GazeDatasetSplit) {
+        guard isRunning, calibrationProgress == nil else { return }
+        datasetError = nil
+        do {
+            try datasetRecorder.start(
+                split: split,
+                geometry: DisplayGeometry.datasetGeometry(viewingDistanceMM: viewingDistanceMM),
+                cameraFormat: capture.activeFormatDescription)
+            datasetProgress = datasetRecorder.snapshot()
+            datasetTimer?.invalidate()
+            datasetTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.refreshGazeDataset() }
+            }
+        } catch {
+            datasetError = error.localizedDescription
+        }
+    }
+
+    func cancelGazeDataset() {
+        datasetRecorder.cancel()
+        refreshGazeDataset()
+    }
+
+    func deleteGazeDatasets() {
+        do {
+            try datasetRecorder.deleteAll()
+            datasetProgress = nil
+            datasetError = nil
+        } catch {
+            datasetError = error.localizedDescription
+        }
+    }
+
+    func clearGazeDatasetResult() {
+        guard !datasetRecorder.isCollecting else { return }
+        datasetProgress = nil
+        datasetError = nil
+    }
+
+    var gazeDatasetRootURL: URL? { datasetRecorder.rootURL }
+
+    private func refreshGazeDataset() {
+        datasetProgress = datasetRecorder.snapshot()
+        guard datasetProgress?.status == .collecting else {
+            datasetTimer?.invalidate()
+            datasetTimer = nil
+            return
+        }
+    }
+
     func attach(renderer: MetalRenderer) {
         self.renderer = renderer
         renderer.mirror = mirrorPreview
@@ -514,6 +572,7 @@ final class PipelineController: ObservableObject {
     }
 
     func stop() {
+        if datasetRecorder.isCollecting { cancelGazeDataset() }
         virtualCamera.disconnect()
         capture.stop()
         consumerTask?.cancel(); consumerTask = nil
@@ -563,6 +622,7 @@ final class PipelineController: ObservableObject {
         let pipelineMetrics = self.pipelineMetrics
         let diagnostics = self.diagnostics
         let qualityRecorder = self.qualityRecorder
+        let datasetRecorder = self.datasetRecorder
         let activeCalibration = self.activeCalibration
         let sessionStore = self.sessionStore
         let virtualCamera = self.virtualCamera
@@ -583,7 +643,9 @@ final class PipelineController: ObservableObject {
                 // correction is suppressed while calibrating: the user is being asked to judge
                 // where they are looking, and warped eyes would make that impossible
                 let calibrating = sessionStore.withLock { $0 != nil }
-                let enabled = correctionSwitch.withLock { $0 } && !calibrating
+                let collectingDataset = datasetRecorder.isCollecting
+                let enabled = correctionSwitch.withLock { $0 }
+                    && !calibrating && !collectingDataset
                 let calibration = activeCalibration.withLock { $0 }
 
                 // filtering runs on the frame's own capture time, so smoothing and slew follow
@@ -709,6 +771,7 @@ final class PipelineController: ObservableObject {
                 // exactly one frame in flight while still taking tracking off the critical path
                 let tr = await tracked
                 trackingMetrics.record(ms: (HostClock.seconds - tStart) * 1000)
+                datasetRecorder.record(frame, tracking: tr, now: frameTime)
 
                 // losing the face invalidates the history, otherwise reacquisition blends the new
                 // position against wherever the face used to be and visibly slides into place

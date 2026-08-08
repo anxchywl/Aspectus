@@ -20,5 +20,10 @@ struct Aspectus: App {
         Settings {
             SettingsView(controller: controller, virtualCamera: virtualCamera, ui: ui)
         }
+
+        Window("Gaze model data", id: "gaze-dataset") {
+            GazeDatasetView(controller: controller)
+        }
+        .defaultSize(width: 900, height: 650)
     }
 }

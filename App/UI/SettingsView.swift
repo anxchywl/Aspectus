@@ -6,6 +6,7 @@ import AspectusKit
 /// the toolbar keeps only the controls worth reaching for mid-call; anything set and forgotten —
 /// the redirect angle, the camera, the virtual camera's install state — lives here and is saved
 struct SettingsView: View {
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject var controller: PipelineController
     @ObservedObject var virtualCamera: SystemExtensionInstaller
     @ObservedObject var ui: UIState
@@ -19,7 +20,7 @@ struct SettingsView: View {
         }
         // fixed rather than fitted: the tab view sizes to whichever pane opened first, which cut
         // the calibration buttons off the bottom of the correction pane
-        .frame(width: 480, height: 500)
+        .frame(width: 480, height: 570)
     }
 
     private var correction: some View {
@@ -72,6 +73,14 @@ struct SettingsView: View {
                     Button("Reset") { controller.resetCalibration() }
                         .disabled(controller.calibration == nil)
                 }
+            }
+
+            Section("Gaze model development") {
+                Button("Collect model data…") { openWindow(id: "gaze-dataset") }
+                    .disabled(!controller.isRunning || controller.calibrationProgress != nil)
+                Text("Records labelled 60 × 60 eye crops and head pose on this Mac. This is "
+                     + "biometric training data: it is never uploaded and can be deleted here.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

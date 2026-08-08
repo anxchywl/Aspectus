@@ -37,6 +37,18 @@ enum DisplayGeometry {
         return geometry.isUsable ? geometry : nil
     }
 
+    static func datasetGeometry(viewingDistanceMM: Double,
+                                screen: NSScreen? = .main) -> GazeDatasetGeometry? {
+        guard let screen,
+              let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+                as? NSNumber else { return nil }
+        let size = CGDisplayScreenSize(CGDirectDisplayID(number.uint32Value))
+        let geometry = GazeDatasetGeometry(displayWidthMM: Double(size.width),
+                                           displayHeightMM: Double(size.height),
+                                           viewingDistanceMM: viewingDistanceMM)
+        return geometry.isUsable ? geometry : nil
+    }
+
     /// for the calibration sheet, so the user can sanity-check what the fit is assuming
     static func displayDescription(for screen: NSScreen? = .main) -> String {
         guard let screen,
