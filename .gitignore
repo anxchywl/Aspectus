@@ -7,6 +7,16 @@ DerivedData/
 # XcodeGen output — regenerate with `xcodegen generate`
 Aspectus.xcodeproj/
 .swiftpm/
+.venv-model/
+
+# model-development outputs
+Training/.venv/
+Training/data/
+Training/runs/
+__pycache__/
+*.py[cod]
+*.pt
+*.mlpackage/
 
 # release artifacts
 dist/

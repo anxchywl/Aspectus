@@ -48,6 +48,10 @@ preview and correction carry on untouched.
 Correction currently uses a geometric eyeball model rather than a learned warp field. It sits behind
 the `EyeCorrector` protocol, so replacing it touches nothing else.
 
+The next quality step is now reproducible rather than hypothetical: the app can explicitly collect
+local eye-crop training and validation sessions, and `Training/` contains a small gaze-direction
+model plus a gated Core ML conversion. No learned weight is shipped or used by the app yet.
+
 ## Quick start
 
 **Requires** Xcode 26+, macOS 14+, Apple Silicon.
@@ -118,7 +122,8 @@ from a camera that caps at 30.
 |---|---|
 | 1 — Capture, Metal preview, latency HUD | ✅ measured on device |
 | 2 — Vision tracking: landmarks, pupils, head pose | ✅ running |
-| 3 — Geometric eye warp in Metal | ✅ working, over the latency budget |
+| 3 — Geometric eye warp in Metal | ✅ within the pipeline budget; visual quality limited |
+| 3a — Appearance gaze estimator (Core ML) | 🟨 recorder and trainer ready; real held-out gate pending |
 | 3b — Learned warp field (Core ML) | ⬜ blocked — no licence-clean weights |
 | 4 — Temporal quality: filters, gate, slew | ✅ wired and tested |
 | 5 — Virtual camera (CoreMediaIO) | ✅ verified in Zoom, Meet and Teams; three other hosts untested |
@@ -135,6 +140,7 @@ Tests/                 unit tests for the real-time invariants
 App/                   capture, Metal render, pipeline, SwiftUI, virtual-camera sink
 CameraExtension/       the CoreMediaIO system extension, its own process
 Shared/                the format contract, compiled into both
+Training/              offline dataset validation, training and Core ML conversion
 scripts/               signing, notarization, packaging
 docs/                  design record and infrastructure
 ```

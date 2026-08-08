@@ -1,7 +1,7 @@
 # Aspectus for macOS — Design (Phase 1)
 
 Reference machine: Apple M3, macOS 26.6 (25G72), Xcode 26.6 (17F113), Swift 6.3.3 (measured).
-Status: phases 1–6 implemented; 196 unit tests green in a release build. The virtual camera is
+Status: phases 1–6 implemented; 202 unit tests green in a release build. The virtual camera is
 verified in three of the six conferencing hosts — Zoom, Google Meet and Microsoft Teams — and
 untested in the other three. See "Measured facts" below for what has actually been run on hardware.
 
@@ -54,6 +54,19 @@ reports 12.58–13.07° for its small models. MPIIGaze is explicitly CC BY-NC-SA
 terms restrict use to non-commercial research and prohibit redistribution of its data and models.
 Those sources can inform evaluation, but their current public artifacts cannot simply be bundled in
 a commercial app.
+
+The closest licence-clean architecture reference found after the hardware rejection is Intel Open
+Model Zoo's `gaze-estimation-adas-0002`: separate 60 × 60 RGB eye inputs plus three head-pose angles,
+with a three-dimensional gaze output. Its published held-out mean angular error is **6.95°**, already
+larger than this project's 5° p95 gate, so its checkpoint is not a product answer. Its input contract
+does support a smaller shared-eye encoder as the next controlled experiment. The implementation here
+is original, uses no Open Model Zoo code or weights, and predicts yaw/pitch directly for the existing
+`GazeEstimator` seam.
+
+- Open Model Zoo model card: <https://docs.openvino.ai/2023.3/omz_models_model_gaze_estimation_adas_0002.html>
+- Open Model Zoo repository and licence: <https://github.com/openvinotoolkit/open_model_zoo>
+- Core ML image-input conversion: <https://apple.github.io/coremltools/docs-guides/source/image-inputs.html>
+- Core ML ML Program conversion: <https://apple.github.io/coremltools/docs-guides/source/convert-to-ml-program.html>
 
 - L2CS-Net: <https://github.com/Ahmednull/L2CS-Net>
 - MobileGaze: <https://github.com/yakhyo/gaze-estimation>
@@ -191,7 +204,7 @@ preview visible: face tracking 19.2 / 29.2, warp 1.8 / 2.4, processing 45.7 / 61
     earlier and turns it from one observation into four.
   - Note that elapsed time in the CSV is *awake* time: `HostClock` does not advance while the
     machine sleeps, which is why 10.5 hours of wall clock produced 98 minutes of samples.
-- 196 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
+- 202 unit tests pass (`swift test`). Covered: drop-stale backpressure and drop counting, box depth
   and reopen, 1€ jitter reduction and bounded-lag tracking, gate hysteresis / angle-limit fallback
   / slew ramp, blink preservation, filter reset on tracking loss and timestamp discontinuity,
   recovery within the 300 ms budget, gaze geometry and warp containment, metrics percentiles,
@@ -302,6 +315,20 @@ The joint landmark regressor is therefore not in the product. The remaining Phas
 is an appearance-based gaze estimator trained from data the project may legally use and shipped
 with explicitly redistributable weights.
 
+That blocker now has a reproducible development path, but not yet passing weights. An explicit
+full-screen flow records paired 60 × 60 eye crops, head pose and physical screen/lens labels under
+Application Support. It never records a full-face frame, never runs during ordinary use, disables
+correction while collecting, and exposes reveal and permanent-delete actions. Training and
+validation use separate deterministic fixation sessions; the trainer refuses incomplete sessions
+and never manufactures a row-level random split.
+
+The offline trainer is a 53,794-parameter shared-eye CNN with a head-pose input. It exports an
+FP16 Core ML ML Program only after a held-out session clears median ≤ 2°, p95 ≤ 5° and physical-lens
+p95 ≤ 3°. The conversion contract is verified locally as two RGB image inputs plus one head-pose
+tensor, with Core ML and PyTorch agreeing within the smoke-test tolerance. A personalized passing
+model would prove the signal and unlock native integration; it would not be representative or
+redistributable product training data.
+
 The conservative large-pose path is verified on hardware. In a 112.6 s installed-release run,
 head pose reached 66.8° yaw and 27.7° pitch; 38 sampled intervals named `headPose`, set correction
 to passthrough and kept the virtual camera streaming. Returning inside the trusted range restored
@@ -369,6 +396,11 @@ Teams have since been verified the same way, taking the matrix to three of six. 
 Slack and OBS.
 
 ## Known gaps
+
+- **No appearance-model weights have passed the gate yet.** Collection, session-isolated
+  evaluation and Core ML conversion are implemented, but real training and validation sessions
+  still need to be recorded on the reference camera. Until a held-out run passes, the runtime stays
+  on the rejected geometric gaze estimate and cannot claim reliable camera-directed gaze.
 
 - ~~Output FPS latches at its last value when the window is occluded instead of decaying to zero.~~
   **Fixed and measured.** The meters were only recomputed when an event arrived, so a source that
