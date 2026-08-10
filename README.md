@@ -3,158 +3,192 @@
 [![CI](https://github.com/anxchywl/Aspectus/actions/workflows/ci.yml/badge.svg)](https://github.com/anxchywl/Aspectus/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
-**Look at the camera while you read your screen.** Aspectus corrects your eye contact in real time
-and publishes the result as a standard virtual camera, so Zoom, Meet, Teams, Discord, Slack and OBS
-see a corrected feed with no plugin to install.
-
-Native macOS, Apple Silicon only. Swift, SwiftUI, AVFoundation, Metal, Apple Vision and a
-CoreMediaIO camera extension. No Electron, no Python runtime.
+Aspectus is an experimental Apple-Silicon macOS app for local eye-contact correction. It captures
+camera frames, tracks the face and eyes with Apple Vision, resamples the original eye pixels with
+Metal, shows a live preview, and can publish the result through a CoreMediaIO virtual camera.
 
 > [!WARNING]
-> **In development.** The pipeline runs end to end and the virtual camera works in Zoom, Google Meet
-> and Microsoft Teams, but the other three host apps are untested and correction quality is a
-> geometric baseline, not the target.
-> A signed, notarized [0.1.0 release](https://github.com/anxchywl/Aspectus/releases/tag/v0.1.0) is
-> available for Apple Silicon. Building the virtual camera yourself still needs an Apple Developer
-> ID — macOS will not activate an unsigned camera extension. See [Status](#status).
+> Aspectus is a technical preview, not a finished gaze-correction product. The active geometric
+> gaze estimator does not produce reliable lens-directed gaze, and no learned gaze model is
+> integrated or shipped. Use the current build to study the pipeline and virtual camera, not for
+> natural correction in important calls.
 
-## What it does
+## Current status
 
-- **Redirects gaze** by warping only the eye regions, resampling the original pixels — it never
-  synthesizes a face, so identity, glasses, eyelids and lighting survive by construction
-- **Falls back cleanly** — below the confidence or angle limit the untouched frame passes through
-- **Stays stable** — 1€ filters remove flicker without visible lag, and blinks stay sharp
-- **Publishes** to a system-wide virtual camera that other apps see as ordinary hardware
+| Area | Status |
+|---|---|
+| Native capture, tracking, Metal rendering and preview | Implemented and measured on the reference Mac |
+| Geometric gaze estimation and eye warp | Implemented, but visual gaze quality is rejected |
+| Appearance-based gaze model | Offline trainer exists; current model direction failed the Phase 3 gate |
+| Original-frame fallback and temporal gate | Implemented and unit-tested; large-pose fallback measured |
+| Virtual camera | Verified in Zoom, Google Meet and Microsoft Teams |
+| Discord, Slack and OBS | Not tested |
+| General-user model and redistributable weights | Not available |
 
-Calibration is optional. The app works out of the box on any supported Mac, and what you change in
-Settings — the screen-to-lens angle, the camera, the viewing distance, what the preview shows — is
-still there next launch.
+The best consumed development result met the `2° / 5° / 3°` median, overall-p95 and lens-p95
+gates, but its frozen checkpoint failed the next untouched session at `1.68° / 5.17° / 3.68°`.
+All seven completed sessions have since influenced development. A three-seed follow-up rejected
+further full fine-tuning of the current Open Model Zoo initializer. No candidate is frozen, another
+validation recording is not justified, and native learned-model integration is blocked. The full
+evidence and next research direction are in [docs/DESIGN.md](./docs/DESIGN.md).
 
-## How it works
+## Install the technical preview
 
-```
-Camera → Face & eye tracking → Gaze estimation → Eye correction
-       → Temporal stabilization → Metal compositing → Virtual camera
-```
+A signed and notarized [v0.1.0 release](https://github.com/anxchywl/Aspectus/releases/tag/v0.1.0)
+is available for Apple Silicon. Download the ZIP and its SHA-256 file, verify the checksum, move
+`Aspectus.app` to Applications, then launch it and grant camera access. This release is an older
+technical preview with the same geometric-estimator limitation described above; current source
+contains later Phase 3 protocol and documentation work.
 
-At most one frame is ever in flight: capture hands off through a single-slot, drop-stale box and
-counts what it drops. Apple Vision locates the face, eye regions, pupils and head pose off the main
-actor; a Metal shader rotates the iris toward the lens; a confidence gate decides how much of that
-to blend in. The corrected frame goes to the preview and to the camera extension in the same step.
+## Build from source
 
-The virtual camera is an output, never a dependency — if the extension is missing or fails, the
-preview and correction carry on untouched.
+Requirements:
 
-Correction currently uses a geometric eyeball model rather than a learned warp field. It sits behind
-the `EyeCorrector` protocol, so replacing it touches nothing else.
-
-The next quality step is now reproducible rather than hypothetical: the app can explicitly collect
-local eye-crop training and validation sessions, and `Training/` contains a small gaze-direction
-model plus a gated Core ML conversion. No learned weight is shipped or used by the app yet.
-
-## Quick start
-
-**Requires** Xcode 26+, macOS 14+, Apple Silicon.
+- Apple Silicon Mac
+- deployment target macOS 14; hardware evidence currently comes from macOS 26.6
+- Xcode 26 (tested with 26.6)
+- [XcodeGen](https://github.com/yonaskolb/XcodeGen)
+- Metal toolchain component for Xcode 26
 
 ```bash
 brew install xcodegen
-xcodebuild -downloadComponent MetalToolchain   # Xcode 26 ships Metal separately (~690 MB)
+xcodebuild -downloadComponent MetalToolchain
 ```
 
-The core library builds and tests without a camera:
+The framework-free core builds without a camera or signing identity:
 
 ```bash
-swift test
+swift test -c release
 ```
 
-The app:
+Generate and open the app project:
 
 ```bash
+cp scripts/Signing.xcconfig.example Signing.xcconfig
 xcodegen generate
-open Aspectus.xcodeproj      # ⌘R, then grant camera permission
+open Aspectus.xcodeproj
 ```
 
-This gives you the app and its live preview, but **not** the virtual camera — that needs a signed
-build:
+With the example signing file unchanged, an unsigned build can run the app and preview but cannot
+activate the camera extension. A contributor-signed virtual camera currently needs coordinated
+team-specific bundle IDs, app-group IDs, the mach service, entitlements and package paths; setting
+only a team ID is not sufficient for a fork. See
+[docs/INFRASTRUCTURE.md](./docs/INFRASTRUCTURE.md) before changing signing or identifiers.
+
+The release script is for maintainers with a correctly configured Developer ID identity and
+notarization profile:
 
 ```bash
-cp scripts/Signing.xcconfig.example Signing.xcconfig   # add your team; the file is gitignored
-./scripts/package-release.sh                           # signs, notarizes, staples
+./scripts/package-release.sh
 ```
 
-Launch the packaged app, click **Install camera**, and approve it once under System Settings ▸
-General ▸ Login Items & Extensions ▸ Camera Extensions. Aspectus then appears beside your real
-cameras. Full build, signing and release detail: [docs/INFRASTRUCTURE.md](./docs/INFRASTRUCTURE.md).
+Explicit flags can produce clearly labeled unsigned or dirty diagnostic artifacts. Missing
+notarization credentials or a failed notarization always stops the release path.
 
-## Performance
+## Use Aspectus
 
-Release build, Apple M3 / macOS 26.6, FaceTime HD at 1280×720. A 174 s controlled run: subject
-square to the camera, correction engaged on 90 % of samples, preview visible, display held awake.
+1. Launch Aspectus and grant camera access.
+2. Press **Start** to open the camera and preview the current correction pipeline.
+3. Use **Settings → Correction → Calibrate** only as an experiment; calibration does not solve the
+   known geometric-estimator limitation.
+4. From a signed build, choose **Install camera** and approve the extension under **System Settings
+   → General → Login Items & Extensions → Camera Extensions**.
+5. Select **Aspectus** as the camera in Zoom, Google Meet or Microsoft Teams.
 
-| Stage | mean | p95 |
-|---|---|---|
-| Vision (face, eyes, pupils, head pose) | 6.1 ms | 6.7 ms |
-| Eye warp (Metal) | 0.8 ms | 1.3 ms |
-| **Ingest → corrected frame ready** | **0.75 ms** | **1.3 ms** |
-| Ingest → present | 25.9 ms | 32.0 ms |
-| Capture → present | 54.0 ms | 60.1 ms |
+The virtual camera is an output, not a dependency. Preview continues if it is unavailable. As
+tracking confidence, eye openness, head pose or requested correction leaves the trusted envelope,
+Aspectus reduces correction and ultimately returns to the original frame instead of substituting a
+different estimate.
 
-Frames in flight never exceeded 1. A separate **97-minute soak** published 136,479 frames to the
-virtual camera, dropped 63 (0.036 %), survived three sleep/wake cycles — 1.8–2.0 s from wake to
-frames each time — and ended with resident memory *lower* than it started.
+## Architecture
 
-**The correction pipeline fits its budget with room to spare:** ingest to corrected frame is 1.3 ms
-p95 against 20 ms. What misses is **ingest → present at 32 ms p95**, and the gap is display-path
-latency after the frame is already finished — cost the virtual camera does not pay. 60 FPS is
-unreachable because this camera caps at 30 at every format it offers. An earlier table here quoted
-19.2 ms for tracking; that number was a mislabelled metric and is not reproducible by any build —
-the whole reconciliation is in [docs/DESIGN.md](./docs/DESIGN.md).
-
-Every number here comes from the app's own CSV recorder in a release build, never an estimate. The
-HUD's frame-rate meters count events over a fixed window rather than across the gap between them, so
-a source that stalls and then catches up now reads as the rate it really delivered — before that fix
-it briefly showed 58 fps of output while capture and process both read 30, and 78 fps of capture
-from a camera that caps at 30.
-
-## Status
-
-| Phase | State |
-|---|---|
-| 1 — Capture, Metal preview, latency HUD | ✅ measured on device |
-| 2 — Vision tracking: landmarks, pupils, head pose | ✅ running |
-| 3 — Geometric eye warp in Metal | ✅ within the pipeline budget; visual quality limited |
-| 3a — Appearance gaze estimator (Core ML) | 🟨 recorder and trainer ready; real held-out gate pending |
-| 3b — Learned warp field (Core ML) | ⬜ blocked — no licence-clean weights |
-| 4 — Temporal quality: filters, gate, slew | ✅ wired and tested |
-| 5 — Virtual camera (CoreMediaIO) | ✅ verified in Zoom, Meet and Teams; three other hosts untested |
-| 6 — UI and hardening | ✅ settings, saved preferences, menus, inspector; 97-min soak passed |
-
-Known gaps and everything not yet measured on hardware are listed at the end of
-[docs/DESIGN.md](./docs/DESIGN.md).
-
-## Layout
-
+```text
+AVFoundation capture
+  → Vision face and eye tracking
+  → gaze estimation
+  → temporal stabilization and safety gate
+  → original-pixel Metal eye warp
+  → preview and CoreMediaIO virtual camera
 ```
-Sources/AspectusKit/   framework-free core: backpressure, filters, gate, recovery, metrics
-Tests/                 unit tests for the real-time invariants
-App/                   capture, Metal render, pipeline, SwiftUI, virtual-camera sink
-CameraExtension/       the CoreMediaIO system extension, its own process
-Shared/                the format contract, compiled into both
+
+At most one frame is in flight. A single-slot, newest-frame-wins hand-off drops and counts stale
+frames instead of building latency. The hot path keeps frames in `CVPixelBuffer` / IOSurface /
+Metal textures, and inference or tracking never runs on the main actor.
+
+The main replacement seams are `FaceTracker`, `GazeEstimator`, `EyeCorrector`, `FrameCompositor`
+and `FrameSink`. `AspectusKit` contains framework-free scheduling, geometry, temporal and fallback
+logic; Apple frameworks remain in the app target.
+
+```text
+Sources/AspectusKit/   framework-free pipeline core
+Tests/                 deterministic core tests
+App/                   capture, tracking, rendering, UI and virtual-camera sink
+CameraExtension/       CoreMediaIO system extension
+Shared/                app/extension format contract
 Training/              offline dataset validation, training and Core ML conversion
-scripts/               signing, notarization, packaging
-docs/                  design record and infrastructure
+scripts/               release packaging
+docs/                  design evidence and build operations
 ```
 
-## Documentation
+## Privacy
 
-| | |
-|---|---|
-| [docs/DESIGN.md](./docs/DESIGN.md) | research, foundation choice, risks, measured facts, known gaps |
-| [docs/INFRASTRUCTURE.md](./docs/INFRASTRUCTURE.md) | build system, targets, entitlements, signing, CI, logs |
-| [AGENTS.md](./AGENTS.md) | architecture and coding rules for contributors and AI agents |
+- The runtime app has no remote telemetry, analytics or cloud-inference code. Camera processing
+  stays on the Mac. A conferencing app receives virtual-camera frames only when the user selects Aspectus;
+  that app's own transmission and privacy policy still apply.
+- Model-data collection is off by default and must be started explicitly. It stores paired eye
+  crops; participant and session UUIDs; frame and sample identifiers; timing and tracking quality;
+  head pose; camera and display geometry; and target labels and coordinates locally under
+  `~/Library/Application Support/Aspectus/gaze-datasets/` with owner-only permissions.
+- Eye crops are biometric data. Do not commit, upload or share them. The collection UI can reveal
+  or permanently delete the local dataset.
+- Checkpoints, reports and conversions stay in ignored, owner-only `Training/runs/`. No dataset,
+  learned weight or model artifact is tracked in this repository.
+- The app itself performs no downloads. The separate offline training fetcher accesses the network
+  only when invoked explicitly and verifies the downloaded archive and model checksums.
 
-## Licence
+## Measured limits
 
-[Apache-2.0](./LICENSE). Copyright 2026 anxchywl. See [NOTICE](./NOTICE) for attribution: the
-correction method is a native reimplementation of BSD-3-licensed work, with no code and no trained
-weights taken from it.
+On the reference Apple M3 running macOS 26.6 with a 1280×720 FaceTime HD camera, a controlled
+Release run measured Vision at `6.71 ms` p95 and the geometric Metal warp at `1.32 ms` p95. The
+formal processing metric, ingest to preview presentation, was `32.0 ms` p95 and therefore missed
+the `<20 ms` target. Camera PTS to presentation was `60.1 ms` p95. A 97.6-minute soak kept queue
+depth at one or less, published 136,479 virtual-camera frames, dropped 63 of roughly 175,000
+captured frames, and showed no rising memory trend.
+
+These measurements prove the reference pipeline's behavior, not natural gaze quality or other
+hardware. Remaining limits include:
+
+- macOS 14 and 15 have not been hardware-tested
+- learned-model native latency has not been measured
+- the reference camera is limited to 30 fps; the 60 fps path is not hardware-verified
+- natural behavior with glasses, low light, partial occlusion and large gaze offsets is unproven
+- physical camera disconnect and capture runtime-error recovery are unit-tested but not measured
+- first-install virtual-camera visibility and Discord, Slack and OBS compatibility are unverified
+- the current fixed `com.aspectus` identifiers make contributor signing awkward
+- a personalized reference-machine pass would not establish general-user quality or redistribution
+  rights
+
+## Contributing and development
+
+Focused issues and pull requests are welcome. Do not attach eye crops, participant/session
+metadata, checkpoints or other biometric artifacts. Describe whether evidence is inspected,
+unit-tested, converted, Release-tested or hardware-measured.
+
+Read these before changing behavior:
+
+- [AGENTS.md](./AGENTS.md) — architecture, safety, measurement and contribution rules
+- [docs/DESIGN.md](./docs/DESIGN.md) — product constraints, model research and measured evidence
+- [docs/INFRASTRUCTURE.md](./docs/INFRASTRUCTURE.md) — targets, signing, CI, storage and logs
+- [Training/README.md](./Training/README.md) — offline Phase 3 protocol and privacy boundaries
+
+`project.yml` is the project source. `Aspectus.xcodeproj` is generated and must not be edited or
+committed. Run core tests in Release, regenerate the project after spec changes, and distinguish
+unit-tested, converted, Release-tested and hardware-measured claims.
+
+## Licensing
+
+Repository source is licensed under [Apache-2.0](./LICENSE); attribution and research provenance
+are recorded in [NOTICE](./NOTICE). A code licence does not by itself clear separately distributed
+model weights, training data, derived weights or biometric collection; any patent grant depends on
+the exact licence. The audited pretrained initializer is an ignored local development artifact and
+is not bundled with Aspectus.

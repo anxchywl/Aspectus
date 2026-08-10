@@ -3,8 +3,9 @@ Copyright 2026 anxchywl
 
 Licensed under the Apache License, Version 2.0. See LICENSE.
 
-The gaze-correction stage is a native reimplementation of the warp-field method
-from chihfanhsu/gaze_correction ("Look at me!", ACM TOMM 2019), Copyright 2019
-Chih-Fan Hsu, licensed under BSD-3-Clause. No source code and no trained weights
-from that project are included here; see docs/DESIGN.md for the analysis behind
-that decision.
+Research acknowledgement: chihfanhsu/gaze_correction ("Look at me!", ACM TOMM
+2019), Copyright 2019 Chih-Fan Hsu, was reviewed as a possible learned
+warp-field direction. Its code is BSD-3-Clause licensed. Aspectus currently uses
+an independently written geometric Metal eye warp, not that learned model. No
+source code, checkpoints, weights or training data from that project are
+included. See docs/DESIGN.md for the provenance and rights analysis.
