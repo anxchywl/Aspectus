@@ -56,12 +56,14 @@ fi
 VERSION=$(sed -n 's/.*MARKETING_VERSION: *"\(.*\)"/\1/p' project.yml | head -1)
 COMMIT=$(git rev-parse --short HEAD)
 DIRTY=$(git status --porcelain | wc -l | tr -d ' ')
+DIRTY_SUFFIX=""
 if [ "$DIRTY" -ne 0 ]; then
   # opt-in for work that can only be debugged from a signed, installed build; the artifact is
   # stamped -dirty so it can never be mistaken for a release
   [ "$ALLOW_DIRTY" -eq 1 ] || fail "the working tree has uncommitted changes; a release must be reproducible from a commit.
 To build a throwaway diagnostic artifact from a dirty tree instead, re-run with --allow-dirty."
   COMMIT="$COMMIT-dirty"
+  DIRTY_SUFFIX="-dirty"
   say "DIRTY TREE — this artifact is for diagnosis only and is not a release"
 fi
 
@@ -134,7 +136,7 @@ if [ -n "$IDENTITY" ]; then
   if xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
     say "notarizing (this waits for Apple and can take several minutes)"
     ZIP_FOR_NOTARY="$BUILD_DIR/Aspectus-notary.zip"
-    ditto -c -k --keepParent "$APP" "$ZIP_FOR_NOTARY"
+    ditto -c -k --norsrc --noextattr --noqtn --noacl --keepParent "$APP" "$ZIP_FOR_NOTARY"
     xcrun notarytool submit "$ZIP_FOR_NOTARY" --keychain-profile "$NOTARY_PROFILE" --wait
     say "stapling the ticket"
     xcrun stapler staple "$APP"
@@ -156,15 +158,15 @@ say "packaging"
 OUT="dist"
 mkdir -p "$OUT"
 if [ "$STAPLED" -eq 1 ]; then
-  NAME="Aspectus-$VERSION-arm64"
+  NAME="Aspectus-$VERSION-arm64$DIRTY_SUFFIX"
 elif [ -n "$IDENTITY" ]; then
-  NAME="Aspectus-$VERSION-arm64-signed-not-notarized"
+  NAME="Aspectus-$VERSION-arm64$DIRTY_SUFFIX-signed-not-notarized"
 else
-  NAME="Aspectus-$VERSION-arm64-UNSIGNED"
+  NAME="Aspectus-$VERSION-arm64$DIRTY_SUFFIX-UNSIGNED"
 fi
 ZIP="$OUT/$NAME.zip"
 rm -f "$ZIP"
-ditto -c -k --keepParent "$APP" "$ZIP"
+ditto -c -k --norsrc --noextattr --noqtn --noacl --keepParent "$APP" "$ZIP"
 
 shasum -a 256 "$ZIP" | tee "$ZIP.sha256"
 
