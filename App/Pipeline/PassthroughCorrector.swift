@@ -1,6 +1,6 @@
 import AspectusKit
 
-/// identity corrector, proves the EyeCorrector seam while phase 3's warp model is not wired yet
+/// original-frame fallback when metal correction is unavailable
 struct PassthroughCorrector: EyeCorrector {
     typealias Pixels = CVReadyFrame
     func correct(_ pixels: CVReadyFrame,

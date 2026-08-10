@@ -3,12 +3,8 @@ import Combine
 import os
 import AspectusKit
 
-/// wires capture → box → correction → Metal preview and publishes diagnostics for the HUD
-/// knows nothing about specific models, so phase 2/3 stages slot in without touching this file
-///
-/// latency is reported as three numbers: pipeline (ingest → corrected frame ready, the < 20 ms
-/// target we own and what the virtual camera will inherit), processing (ingest → present) and
-/// end-to-end (camera PTS → present) — the last two add compositor and sensor time we do not own
+/// wires capture → correction → preview while remaining model-agnostic
+/// reports corrected-ready, ingest-to-present and camera-pts-to-present latency separately
 @MainActor
 final class PipelineController: ObservableObject {
     @Published var captureFPS: Double = 0
@@ -106,8 +102,7 @@ final class PipelineController: ObservableObject {
     @Published var correctionMeanMs: Double = 0
     @Published var correctionP95Ms: Double = 0
 
-    /// ingest to corrected-frame-ready, the latency we own and the one the virtual camera will
-    /// inherit; processing/end-to-end both include compositor time the extension will not pay
+    /// corrected-ready latency before preview presentation, also relevant to the virtual camera
     @Published var pipelineMeanMs: Double = 0
     @Published var pipelineP95Ms: Double = 0
     @Published var showOverlay = true { didSet { preferences.showOverlay = showOverlay } }
@@ -591,17 +586,8 @@ final class PipelineController: ObservableObject {
         outputFPS = 0
     }
 
-    /// the loop body runs off the main actor, hopping only to publish overlay state and to draw,
-    /// since MTKView is main-actor bound; tracking and correction never touch the main actor
-    ///
-    /// Vision landmark detection costs ~20 ms, measured, and shrinking it would mean giving up the
-    /// pupil points correction depends on. So it runs concurrently with the warp instead of ahead
-    /// of it, and each frame is corrected using the previous frame's landmarks — one frame of
-    /// staleness, against ~20 ms of latency removed from the display path.
-    ///
-    /// the loop still awaits tracking before taking the next frame, so exactly one frame is ever
-    /// in flight; throughput is capped by max(tracking, frame interval), and tracking is faster
-    /// than the camera's 33 ms cadence
+    /// keeps tracking off the preview critical path while awaiting it before the next frame
+    /// correction uses previous-frame landmarks so the single-frame invariant still holds
     private func startConsumer() {
         let box = capture.output
         let tracker = self.tracker
@@ -709,8 +695,7 @@ final class PipelineController: ObservableObject {
                     }
                 }
 
-                // ingest to corrected-frame-ready: our own cost, and what the virtual camera will
-                // see, with none of the compositor latency the preview's present time includes
+                // supplemental corrected-ready metric before preview presentation
                 pipelineMetrics.record(ms: (HostClock.seconds - frame.header.timing.ingestHostTime) * 1000)
 
                 let ageMs = appliedCapture.map { (frameTime - $0) * 1000 } ?? 0

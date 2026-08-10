@@ -68,7 +68,7 @@ jobs:
       - name: Generate the Xcode project
         run: xcodegen generate
 
-      - name: Verify the camera extension is wired into the app
+      - name: Verify the camera extension target is present
         run: |
           set -euo pipefail
           xcodebuild -project Aspectus.xcodeproj -list | grep -q AspectusCameraExtension
