@@ -13,6 +13,7 @@ Aspectus.xcodeproj/
 Training/.venv/
 Training/data/
 Training/runs/
+gaze-datasets/
 __pycache__/
 *.py[cod]
 *.pt

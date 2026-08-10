@@ -310,7 +310,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
 
         let degrees = 180.0 / Double.pi
         let row = [
-            "2", csv(reservation.participantID), csv(reservation.sessionID),
+            "3", csv(reservation.participantID), csv(reservation.sessionID),
             reservation.split.rawValue, "\(reservation.sampleNumber)",
             "\(frame.header.id.value)", fmt(reservation.elapsed),
             "\(reservation.target.id)", reservation.target.kind.rawValue,
@@ -375,7 +375,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         case .cancelled: status = "cancelled"
         case .failed: status = "failed"
         }
-        let metadata = Metadata(schemaVersion: 2, participantID: session.participantID,
+        let metadata = Metadata(schemaVersion: 3, participantID: session.participantID,
                                 sessionID: session.id, split: session.split,
                                 createdAt: session.createdAt, completedAt: completedAt,
                                 status: status, displayGeometry: session.geometry,

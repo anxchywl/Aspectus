@@ -25,6 +25,20 @@ final class GazeDatasetPlanTests: XCTestCase {
                        Set(validation.map { "\($0.pose.rawValue),\($0.kind.rawValue),\($0.xFraction),\($0.yFraction)" }))
     }
 
+    func testTargetOrderMatchesTheOfflineIntegrityFixtures() {
+        let training = GazeDatasetPlan.targets(for: .training)
+        let validation = GazeDatasetPlan.targets(for: .validation)
+
+        XCTAssertEqual(training[0], .init(id: 0, kind: .lens, xFraction: 0.5,
+                                          yFraction: 0, pose: .neutral))
+        XCTAssertEqual(training[1], .init(id: 1, kind: .screen, xFraction: 0.5,
+                                          yFraction: 0.5, pose: .neutral))
+        XCTAssertEqual(validation[1], .init(id: 1, kind: .screen, xFraction: 0.7,
+                                            yFraction: 0.5, pose: .neutral))
+        XCTAssertEqual(training[28], .init(id: 28, kind: .screen, xFraction: 0.1,
+                                           yFraction: 0.9, pose: .turnLeft))
+    }
+
     func testGeometryUsesThePhysicalLensAsItsOrigin() throws {
         let geometry = GazeDatasetGeometry(displayWidthMM: 300, displayHeightMM: 200,
                                            viewingDistanceMM: 500)
@@ -53,6 +67,8 @@ final class GazeDatasetPlanTests: XCTestCase {
 final class GazeDatasetAcceptanceTests: XCTestCase {
     private func tracking(confidence: Double = 0.9, openness: Double = 1,
                           yawDegrees: Double = 0, poseAvailable: Bool = true,
+                          pitchDegrees: Double = 0,
+                          rollDegrees: Double = 0,
                           eyeX: Double = 0.2, eyeWidth: Double = 0.08) -> TrackingResult {
         let eye = EyeObservation(region: .init(x: eyeX, y: 0.2,
                                                width: eyeWidth, height: 0.03),
@@ -61,7 +77,8 @@ final class GazeDatasetAcceptanceTests: XCTestCase {
         return TrackingResult(faceBounds: .init(x: 0.1, y: 0.1, width: 0.8, height: 0.8),
                               leftEye: eye, rightEye: eye,
                               headPose: .init(yaw: yawDegrees * .pi / 180,
-                                              pitch: 0, roll: 0),
+                                              pitch: pitchDegrees * .pi / 180,
+                                              roll: rollDegrees * .pi / 180),
                               confidence: confidence,
                               headPoseAvailable: poseAvailable)
     }
@@ -77,6 +94,8 @@ final class GazeDatasetAcceptanceTests: XCTestCase {
         XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(poseAvailable: false)),
                        .headPoseUnavailable)
         XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(yawDegrees: 30)), .headPose)
+        XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(rollDegrees: 21)), .headPose)
+        XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(pitchDegrees: .nan)), .headPose)
         XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(eyeWidth: 0)), .degenerateEyes)
         XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(eyeX: 1.1)), .degenerateEyes)
         XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(eyeX: .nan)), .degenerateEyes)

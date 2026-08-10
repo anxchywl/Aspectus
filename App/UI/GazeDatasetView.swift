@@ -21,7 +21,7 @@ struct GazeDatasetView: View {
                 case .finished:
                     outcome(title: "Session complete", systemImage: "checkmark.circle.fill",
                             tint: .green,
-                            detail: "The labelled eye crops are ready for held-out evaluation.")
+                            detail: "The labelled eye crops are saved locally for model development.")
                 case .cancelled:
                     outcome(title: "Session stopped", systemImage: "xmark.circle.fill",
                             tint: .secondary,
@@ -84,7 +84,7 @@ struct GazeDatasetView: View {
             .pickerStyle(.segmented).frame(width: 340)
 
             VStack(alignment: .leading, spacing: 8) {
-                Label("about 810 labelled samples in 2–3 minutes", systemImage: "clock")
+                Label("about 810 labelled samples in four minutes", systemImage: "clock")
                 Label("two 60 × 60 eye crops plus head pose; no full-face images",
                       systemImage: "crop")
                 Label("stored only in your private Application Support folder",

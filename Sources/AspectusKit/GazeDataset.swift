@@ -41,8 +41,8 @@ public struct GazeDatasetTarget: Codable, Sendable, Equatable, Identifiable {
 public enum GazeDatasetPlan {
     public static let gridSize = 5
     public static let samplesPerTarget = 6
-    public static let captureIntervalSeconds = 0.08
-    public static let settleSeconds = 0.65
+    public static let captureIntervalSeconds = 0.12
+    public static let settleSeconds = 1.0
     public static let lensSettleSeconds = 2.0
     public static let poseTransitionSettleSeconds = 1.5
 
@@ -210,13 +210,16 @@ public enum GazeDatasetAcceptance {
         public var minimumFaceConfidence: Double
         public var minimumOpenness: Double
         public var maximumHeadPoseDegrees: Double
+        public var maximumHeadRollDegrees: Double
 
-        public init(minimumFaceConfidence: Double = 0.60,
+        public init(minimumFaceConfidence: Double = 0.70,
                     minimumOpenness: Double = 0.40,
-                    maximumHeadPoseDegrees: Double = 25.0) {
+                    maximumHeadPoseDegrees: Double = 25.0,
+                    maximumHeadRollDegrees: Double = 20.0) {
             self.minimumFaceConfidence = minimumFaceConfidence
             self.minimumOpenness = minimumOpenness
             self.maximumHeadPoseDegrees = maximumHeadPoseDegrees
+            self.maximumHeadRollDegrees = maximumHeadRollDegrees
         }
     }
 
@@ -227,9 +230,13 @@ public enum GazeDatasetAcceptance {
         guard tracking.leftEye.openness >= config.minimumOpenness,
               tracking.rightEye.openness >= config.minimumOpenness else { return .eyesClosed }
         guard tracking.headPoseAvailable else { return .headPoseUnavailable }
+        let pose = [tracking.headPose.yaw, tracking.headPose.pitch, tracking.headPose.roll]
+        guard pose.allSatisfy(\.isFinite) else { return .headPose }
         let degrees = 180.0 / Double.pi
         let worst = max(abs(tracking.headPose.yaw), abs(tracking.headPose.pitch)) * degrees
-        guard worst <= config.maximumHeadPoseDegrees else { return .headPose }
+        let roll = abs(tracking.headPose.roll) * degrees
+        guard worst <= config.maximumHeadPoseDegrees,
+              roll <= config.maximumHeadRollDegrees else { return .headPose }
         guard usableImageRegion(tracking.leftEye.region),
               usableImageRegion(tracking.rightEye.region) else { return .degenerateEyes }
         return nil
