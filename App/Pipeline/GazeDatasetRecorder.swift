@@ -49,6 +49,20 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         }
     }
 
+    private enum WriteError: Error, LocalizedError {
+        case invalidEyeEvidence
+        case invalidManifestContract
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidEyeEvidence:
+                return "the eye alignment evidence is unavailable for the sample"
+            case .invalidManifestContract:
+                return "the schema 4 manifest fields do not match the declared contract"
+            }
+        }
+    }
+
     private struct Metadata: Codable {
         var schemaVersion: Int
         var participantID: String
@@ -64,6 +78,11 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         var targetCount: Int
         var capturedSamples: Int
         var cameraFormat: String
+        var sourceImageWidth: Int? = nil
+        var sourceImageHeight: Int? = nil
+        var cropContract: GazeDatasetCropContract
+        var labelContract: GazeDatasetLabelContract
+        var headPoseContract: GazeDatasetHeadPoseContract
     }
 
     private struct Session {
@@ -73,6 +92,8 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         var geometry: GazeDatasetGeometry
         var directory: URL
         var cameraFormat: String
+        var sourceImageWidth: Int? = nil
+        var sourceImageHeight: Int? = nil
         var targets: [GazeDatasetTarget]
         var targetIndex = 0
         var samplesForTarget = 0
@@ -98,32 +119,37 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         var angles: (yaw: Double, pitch: Double)
         var sampleNumber: Int
         var elapsed: Double
+        var alignment: GazeDatasetCanonicalAlignment
     }
 
     private struct State {
         var session: Session?
     }
 
-    private static let imageWidth = 60
-    private static let imageHeight = 60
-    private static let manifestHeader = """
-        schema_version,participant_id,session_id,split,sample,frame_id,elapsed_s,target_id,target_kind,\
-        target_x,target_y,target_yaw_deg,target_pitch_deg,pose_prompt,head_yaw_deg,head_pitch_deg,\
-        head_roll_deg,face_conf,open_l,open_r,left_image,right_image
-
-        """
+    private static let imageWidth = GazeDatasetCanonicalAlignment.outputWidth
+    private static let imageHeight = GazeDatasetCanonicalAlignment.outputHeight
+    private static let manifestHeader =
+        GazeDatasetSchema4.manifestColumns.joined(separator: ",") + "\n"
 
     private let state = OSAllocatedUnfairLock(initialState: State())
     private let context = CIContext(options: [.cacheIntermediates: false])
     private let colourSpace = CGColorSpace(name: CGColorSpace.sRGB)!
     private let queue = DispatchQueue(label: "com.aspectus.gaze-dataset", qos: .utility)
     private let log = Logger(subsystem: "com.aspectus.app", category: "gaze-dataset")
+    private let rootOverride: URL?
+
+    // the override exists so tests can exercise the production write path against a
+    // temporary directory instead of the user's real biometric store
+    init(rootDirectory: URL? = nil) {
+        rootOverride = rootDirectory
+    }
 
     var isCollecting: Bool {
         state.withLock { $0.session?.isCollecting == true }
     }
 
     var rootURL: URL? {
+        if let rootOverride { return rootOverride }
         guard let base = try? FileManager.default.url(for: .applicationSupportDirectory,
                                                       in: .userDomainMask,
                                                       appropriateFor: nil,
@@ -200,18 +226,30 @@ final class GazeDatasetRecorder: @unchecked Sendable {
 
     func record(_ frame: CVReadyFrame, tracking: TrackingResult?,
                 now: Double = HostClock.seconds) {
-        let reservation = state.withLock { state -> Reservation? in
+        let decision = state.withLock { state -> (reservation: Reservation?, terminalID: String?) in
             guard var session = state.session, session.isCollecting,
-                  session.targets.indices.contains(session.targetIndex) else { return nil }
+                  session.targets.indices.contains(session.targetIndex) else { return (nil, nil) }
             let target = session.targets[session.targetIndex]
-            if let rejection = GazeDatasetAcceptance.rejection(tracking) {
+            let imageWidth = frame.header.width
+            let imageHeight = frame.header.height
+            if let recordedWidth = session.sourceImageWidth,
+               let recordedHeight = session.sourceImageHeight,
+               (recordedWidth != imageWidth || recordedHeight != imageHeight) {
+                session.status = .failed("the camera frame size changed during collection")
+                state.session = session
+                return (nil, session.id)
+            }
+            session.sourceImageWidth = imageWidth
+            session.sourceImageHeight = imageHeight
+            if let rejection = GazeDatasetAcceptance.rejection(
+                tracking, imageWidth: imageWidth, imageHeight: imageHeight) {
                 _ = session.settleGate.isReady(targetID: target.id, accepted: false,
                                                now: now, settleSeconds: 0)
                 session.rejection = rejection
                 state.session = session
-                return nil
+                return (nil, nil)
             }
-            guard let tracking else { return nil }
+            guard let tracking else { return (nil, nil) }
             let degrees = 180.0 / Double.pi
             let poseAccepted = session.posePromptGate.accepts(
                 target.pose,
@@ -226,26 +264,40 @@ final class GazeDatasetRecorder: @unchecked Sendable {
                                               now: now, settleSeconds: settle) else {
                 session.rejection = poseAccepted ? nil : .posePrompt
                 state.session = session
-                return nil
+                return (nil, nil)
             }
             guard now - session.lastCaptureAt >= GazeDatasetPlan.captureIntervalSeconds,
                   !session.writeInFlight,
-                  let angles = session.geometry.angles(for: target) else {
+                  let angles = session.geometry.angles(for: target),
+                  let alignment = GazeDatasetCanonicalAlignment(
+                    left: tracking.leftEye, right: tracking.rightEye,
+                    imageWidth: imageWidth, imageHeight: imageHeight) else {
                 state.session = session
-                return nil
+                return (nil, nil)
             }
             session.writeInFlight = true
             session.lastCaptureAt = now
             session.rejection = nil
             state.session = session
             _ = tracking
-            return Reservation(participantID: session.participantID,
-                               sessionID: session.id, split: session.split,
-                               directory: session.directory, target: target,
-                               angles: angles, sampleNumber: session.totalSamples + 1,
-                               elapsed: now - session.startedAtHost)
+            return (Reservation(participantID: session.participantID,
+                                sessionID: session.id, split: session.split,
+                                directory: session.directory, target: target,
+                                angles: angles, sampleNumber: session.totalSamples + 1,
+                                elapsed: now - session.startedAtHost,
+                                alignment: alignment), nil)
         }
-        guard let reservation, let tracking else { return }
+        if let terminalID = decision.terminalID {
+            queue.async { [self] in
+                let terminal = state.withLock { state -> Session? in
+                    guard let session = state.session, session.id == terminalID else { return nil }
+                    return session
+                }
+                if let terminal { try? writeMetadata(terminal, completedAt: Date()) }
+            }
+            return
+        }
+        guard let reservation = decision.reservation, let tracking else { return }
 
         queue.async { [self] in
             do {
@@ -300,28 +352,69 @@ final class GazeDatasetRecorder: @unchecked Sendable {
 
     private func write(_ reservation: Reservation, frame: CVReadyFrame,
                        tracking: TrackingResult) throws {
+        guard let leftStart = tracking.leftEye.imageAxisStart,
+              let leftEnd = tracking.leftEye.imageAxisEnd,
+              let rightStart = tracking.rightEye.imageAxisStart,
+              let rightEnd = tracking.rightEye.imageAxisEnd else {
+            throw WriteError.invalidEyeEvidence
+        }
         let stem = String(format: "sample-%05d", reservation.sampleNumber)
         let leftName = "\(stem)-left.png"
         let rightName = "\(stem)-right.png"
-        try writeEye(frame.pixelBuffer, eye: tracking.leftEye,
+        try writeEye(frame.pixelBuffer, crop: reservation.alignment.left,
+                     rotation: reservation.alignment.rotationRadians,
+                     side: reservation.alignment.cropSidePixels,
                      to: reservation.directory.appendingPathComponent(leftName))
-        try writeEye(frame.pixelBuffer, eye: tracking.rightEye,
+        try writeEye(frame.pixelBuffer, crop: reservation.alignment.right,
+                     rotation: reservation.alignment.rotationRadians,
+                     side: reservation.alignment.cropSidePixels,
                      to: reservation.directory.appendingPathComponent(rightName))
 
         let degrees = 180.0 / Double.pi
-        let row = [
-            "3", csv(reservation.participantID), csv(reservation.sessionID),
-            reservation.split.rawValue, "\(reservation.sampleNumber)",
-            "\(frame.header.id.value)", fmt(reservation.elapsed),
-            "\(reservation.target.id)", reservation.target.kind.rawValue,
-            fmt(reservation.target.xFraction), fmt(reservation.target.yFraction),
-            fmt(reservation.angles.yaw), fmt(reservation.angles.pitch),
-            reservation.target.pose.rawValue,
-            fmt(tracking.headPose.yaw * degrees), fmt(tracking.headPose.pitch * degrees),
-            fmt(tracking.headPose.roll * degrees), fmt(tracking.confidence),
-            fmt(tracking.leftEye.openness), fmt(tracking.rightEye.openness),
-            leftName, rightName,
-        ].joined(separator: ",") + "\n"
+        let fields = [
+            "schema_version": "\(GazeDatasetSchema4.version)",
+            "participant_id": csv(reservation.participantID),
+            "session_id": csv(reservation.sessionID),
+            "split": reservation.split.rawValue,
+            "sample": "\(reservation.sampleNumber)",
+            "frame_id": "\(frame.header.id.value)",
+            "elapsed_s": fmt(reservation.elapsed),
+            "target_id": "\(reservation.target.id)",
+            "target_kind": reservation.target.kind.rawValue,
+            "target_x": fmt(reservation.target.xFraction),
+            "target_y": fmt(reservation.target.yFraction),
+            "target_yaw_deg": fmt(reservation.angles.yaw),
+            "target_pitch_deg": fmt(reservation.angles.pitch),
+            "pose_prompt": reservation.target.pose.rawValue,
+            "head_yaw_deg": fmt(tracking.headPose.yaw * degrees),
+            "head_pitch_deg": fmt(tracking.headPose.pitch * degrees),
+            "head_roll_deg": fmt(tracking.headPose.roll * degrees),
+            "face_conf": fmt(tracking.confidence),
+            "open_l": fmt(tracking.leftEye.openness),
+            "open_r": fmt(tracking.rightEye.openness),
+            "left_image": leftName,
+            "right_image": rightName,
+            "contour_points_l": "\(tracking.leftEye.contourPointCount)",
+            "contour_points_r": "\(tracking.rightEye.contourPointCount)",
+            "pupil_source_l": tracking.leftEye.pupilSource.rawValue,
+            "pupil_source_r": tracking.rightEye.pupilSource.rawValue,
+            "pupil_points_l": "\(tracking.leftEye.pupilPointCount)",
+            "pupil_points_r": "\(tracking.rightEye.pupilPointCount)",
+            "axis_start_x_l": fmt(leftStart.x),
+            "axis_start_y_l": fmt(leftStart.y),
+            "axis_end_x_l": fmt(leftEnd.x),
+            "axis_end_y_l": fmt(leftEnd.y),
+            "axis_start_x_r": fmt(rightStart.x),
+            "axis_start_y_r": fmt(rightStart.y),
+            "axis_end_x_r": fmt(rightEnd.x),
+            "axis_end_y_r": fmt(rightEnd.y),
+            "alignment_rotation_deg": fmt(reservation.alignment.rotationRadians * degrees),
+            "alignment_disagreement_deg": fmt(reservation.alignment.disagreementDegrees),
+            "crop_side_px": fmt(reservation.alignment.cropSidePixels),
+            "crop_clipped_fraction_l": fmt(reservation.alignment.left.clippedFraction),
+            "crop_clipped_fraction_r": fmt(reservation.alignment.right.clippedFraction),
+        ]
+        let row = try Self.manifestRow(fields)
         let manifest = reservation.directory.appendingPathComponent("manifest.csv")
         let handle = try FileHandle(forWritingTo: manifest)
         defer { try? handle.close() }
@@ -329,29 +422,42 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         try handle.write(contentsOf: Data(row.utf8))
     }
 
-    private func writeEye(_ buffer: CVPixelBuffer, eye: EyeObservation, to url: URL) throws {
-        let crop = eyeCrop(eye, width: CVPixelBufferGetWidth(buffer),
-                           height: CVPixelBufferGetHeight(buffer))
-        let image = CIImage(cvPixelBuffer: buffer).cropped(to: crop)
-            .transformed(by: CGAffineTransform(translationX: -crop.minX, y: -crop.minY))
-            .transformed(by: CGAffineTransform(scaleX: Double(Self.imageWidth) / crop.width,
-                                               y: Double(Self.imageHeight) / crop.height))
+    static func manifestRow(_ fields: [String: String]) throws -> String {
+        guard fields.count == GazeDatasetSchema4.manifestColumns.count else {
+            throw WriteError.invalidManifestContract
+        }
+        return try GazeDatasetSchema4.manifestColumns.map { column in
+            guard let value = fields[column] else { throw WriteError.invalidManifestContract }
+            return value
+        }.joined(separator: ",") + "\n"
+    }
+
+    func writeEye(_ buffer: CVPixelBuffer,
+                  crop: GazeDatasetCanonicalAlignment.EyeCrop,
+                  rotation: Double, side: Double, to url: URL) throws {
+        let sourceHeight = Double(CVPixelBufferGetHeight(buffer))
+        let centerX = crop.centerX
+        let centerY = sourceHeight - crop.centerY
+        let sourceRotation = -rotation
+        let scale = Double(Self.imageWidth) / side
+        let cosine = cos(sourceRotation)
+        let sine = sin(sourceRotation)
+        let a = scale * cosine
+        let b = -scale * sine
+        let c = scale * sine
+        let d = scale * cosine
+        let outputCenter = Double(Self.imageWidth) / 2
+        let transform = CGAffineTransform(
+            a: a, b: b, c: c, d: d,
+            tx: outputCenter - a * centerX - c * centerY,
+            ty: outputCenter - b * centerX - d * centerY)
+        let bounds = CGRect(x: 0, y: 0, width: Self.imageWidth, height: Self.imageHeight)
+        let image = CIImage(cvPixelBuffer: buffer).clampedToExtent()
+            .transformed(by: transform, highQualityDownsample: true).cropped(to: bounds)
         try context.writePNGRepresentation(of: image, to: url, format: .RGBA8,
                                            colorSpace: colourSpace)
         try FileManager.default.setAttributes([.posixPermissions: 0o600],
                                               ofItemAtPath: url.path)
-    }
-
-    private func eyeCrop(_ eye: EyeObservation, width: Int, height: Int) -> CGRect {
-        let centre = eye.region.center
-        let side = max(eye.region.width * 1.8, eye.region.height * 3.6)
-        let x0 = max(0, centre.x - side / 2)
-        let x1 = min(1, centre.x + side / 2)
-        let y0 = max(0, centre.y - side / 2)
-        let y1 = min(1, centre.y + side / 2)
-        return CGRect(x: x0 * Double(width), y: (1 - y1) * Double(height),
-                      width: (x1 - x0) * Double(width),
-                      height: (y1 - y0) * Double(height)).integral
     }
 
     private func loadOrCreateParticipantID(in root: URL) throws -> String {
@@ -375,7 +481,8 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         case .cancelled: status = "cancelled"
         case .failed: status = "failed"
         }
-        let metadata = Metadata(schemaVersion: 3, participantID: session.participantID,
+        let metadata = Metadata(schemaVersion: GazeDatasetSchema4.version,
+                                participantID: session.participantID,
                                 sessionID: session.id, split: session.split,
                                 createdAt: session.createdAt, completedAt: completedAt,
                                 status: status, displayGeometry: session.geometry,
@@ -383,7 +490,12 @@ final class GazeDatasetRecorder: @unchecked Sendable {
                                 samplesPerTarget: GazeDatasetPlan.samplesPerTarget,
                                 targetCount: session.targets.count,
                                 capturedSamples: session.totalSamples,
-                                cameraFormat: session.cameraFormat)
+                                cameraFormat: session.cameraFormat,
+                                sourceImageWidth: session.sourceImageWidth,
+                                sourceImageHeight: session.sourceImageHeight,
+                                cropContract: .canonicalPairedEyesV1,
+                                labelContract: .lensAngularV1,
+                                headPoseContract: .visionRevision3DegreesV1)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -393,7 +505,9 @@ final class GazeDatasetRecorder: @unchecked Sendable {
                                               ofItemAtPath: url.path)
     }
 
-    private func fmt(_ value: Double) -> String { String(format: "%.6f", value) }
+    func fmt(_ value: Double) -> String {
+        String(format: "%.12f", locale: Locale(identifier: "en_US_POSIX"), value)
+    }
     private func csv(_ value: String) -> String {
         "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
     }

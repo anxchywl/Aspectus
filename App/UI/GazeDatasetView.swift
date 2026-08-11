@@ -85,7 +85,7 @@ struct GazeDatasetView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 Label("about 810 labelled samples in four minutes", systemImage: "clock")
-                Label("two 60 × 60 eye crops plus head pose; no full-face images",
+                Label("aligned eye crops, head pose, gaze labels and crop-quality metadata; no full-face images",
                       systemImage: "crop")
                 Label("stored only in your private Application Support folder",
                       systemImage: "lock")
@@ -178,9 +178,8 @@ struct GazeDatasetView: View {
             if let snapshot = controller.datasetProgress {
                 Text("\(snapshot.totalSamples) samples · \(snapshot.split.rawValue)")
                     .font(.callout.monospaced()).foregroundStyle(.secondary)
-                Text(snapshot.directoryPath)
-                    .font(.caption.monospaced()).foregroundStyle(.tertiary)
-                    .textSelection(.enabled)
+                Text("saved in the private model-data folder")
+                    .font(.caption).foregroundStyle(.tertiary)
             }
             HStack {
                 Button("Reveal data") { revealData() }
@@ -215,6 +214,7 @@ struct GazeDatasetView: View {
         case .headPose: return "turn your head less"
         case .posePrompt: return "move farther in the requested head direction"
         case .degenerateEyes: return "move a little closer"
+        case .eyeAlignment: return "keep both eyes clearly visible"
         }
     }
 

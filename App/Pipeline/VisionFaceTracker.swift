@@ -80,19 +80,31 @@ struct VisionFaceTracker: FaceTracker {
 
         let (leftPupil, leftSource, leftCount) = pupil(landmarks.leftPupil, contour: leftEyePts)
         let (rightPupil, rightSource, rightCount) = pupil(landmarks.rightPupil, contour: rightEyePts)
+        let imageWidth = CVPixelBufferGetWidth(pixelBuffer)
+        let imageHeight = CVPixelBufferGetHeight(pixelBuffer)
+        let leftAxis = EyeObservation.imageAxis(
+            of: leftEyePts, imageWidth: imageWidth, imageHeight: imageHeight)
+        let rightAxis = EyeObservation.imageAxis(
+            of: rightEyePts, imageWidth: imageWidth, imageHeight: imageHeight)
 
         let left = EyeObservation(region: boundingRect(leftEyePts),
                                   pupilCenter: leftPupil,
                                   openness: openness(eyePoints: leftEyePts),
                                   pupilSource: leftSource,
                                   pupilPointCount: leftCount,
-                                  cornerMidpointY: EyeObservation.cornerMidpointY(of: leftEyePts))
+                                  cornerMidpointY: EyeObservation.cornerMidpointY(of: leftEyePts),
+                                  contourPointCount: leftEyePts.count,
+                                  imageAxisStart: leftAxis?.start,
+                                  imageAxisEnd: leftAxis?.end)
         let right = EyeObservation(region: boundingRect(rightEyePts),
                                    pupilCenter: rightPupil,
                                    openness: openness(eyePoints: rightEyePts),
                                    pupilSource: rightSource,
                                    pupilPointCount: rightCount,
-                                   cornerMidpointY: EyeObservation.cornerMidpointY(of: rightEyePts))
+                                   cornerMidpointY: EyeObservation.cornerMidpointY(of: rightEyePts),
+                                   contourPointCount: rightEyePts.count,
+                                   imageAxisStart: rightAxis?.start,
+                                   imageAxisEnd: rightAxis?.end)
 
         // read from the rectangles observation: the landmarks copy is documented to carry the
         // pose through, but the original is the object that actually computed it
