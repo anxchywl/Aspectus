@@ -335,18 +335,53 @@ The head-pitch contradiction is diagnosed: one consumed development session is g
 physically inverted and stays excluded from pitch-gated evidence, leaving only one eligible
 development session. The immediate blocker is therefore insufficient eligible development
 evidence, and beyond it angular-tail stability, especially vertical and physical-lens error,
-remains unresolved. The leading hypotheses are crop alignment and clipping, occlusion/tracking
-quality, limited first-party session diversity and insufficient model/input structure. Core ML
-conversion is not the blocker.
+remains unresolved. Crop alignment has since moved from hypothesis to measured defect: the shared
+crop side of `canonical-paired-eye-v1` couples rendered eye scale to head yaw. The remaining
+hypotheses are occlusion/tracking quality, limited first-party session diversity and insufficient
+model/input structure. Clipping is recorded and measured zero. Core ML conversion is not the
+blocker.
 
 The next step is not training, native integration or an immediate recording. The offline label
 gate must pass before model code can execute, and it cannot pass under the frozen two-session
 development roles. Producing new eligible development evidence means explicitly consented
 collection under the fixed schema-4 collector, which requires approval and physical
 participation. The production Core Image crop sampling and schema-4 serialization are now
-Release-tested against deterministic synthetic frames, but the rendered crop remains unverified
-on recorded biometric evidence and canonical alignment remains unmeasured until compatible
-development evidence is legitimately available.
+Release-tested against deterministic synthetic frames, and the rendered crop is verified on
+recorded biometric evidence: projecting the recorded axis endpoints through the recorder transform
+places the per-eye axis midpoint at the crop centre to 2.8e-14 px and the longer eye axis at
+exactly `60 / 1.8` px with zero variance and zero clipping. The renderer implements its contract
+faithfully and needs no fix.
+
+That verification also showed the contract itself is wrong, so collection must not resume under it.
+`canonical-paired-eye-v1` centres per eye but scales both crops by one shared side taken from the
+longer measured axis, so under head yaw the foreshortened far eye is rendered small: 33.33 px
+against 24.5 px in the turned blocks, a 0.736 ratio correlating with `cos|head yaw|` at r = +0.980.
+A single eye spans a ~40% rendered scale range across a session, almost entirely explained by yaw.
+Because head yaw is correlated with the gaze label by construction of the pose plan, crop zoom
+becomes a pose-coupled encoding of the target — the input normalization shift Gate E named as its
+leading unresolved hypothesis, reintroduced by the normalization intended to remove it. The
+loader's derived-evidence check cannot detect this: the defect is in the contract's definition of
+the shared crop side, and its arithmetic is exact.
+
+The replacement contract is `canonical-paired-eye-v2`, differing from v1 in one declared factor:
+the crop side becomes `1.8 ×` that eye's own axis length rather than `1.8 ×` the maximum of the
+two, making rendered scale invariant by construction. This discards the relative-eye-size cue,
+which is acceptable because head yaw already reaches the model as a numeric feature and does not
+need to re-enter through crop zoom. `crop_side_px` becomes per-eye, so v2 is a schema change and
+not a code fix. Source frames are not retained, so the one recorded schema-4 session cannot be
+re-rendered under v2; it is superseded rather than repairable, which is why the contract must be
+settled before any further collection rather than after.
+
+Two collection-plan questions remain open under v2. Roll normalization is still unvalidated: the
+recorded session holds head roll to 1.68° sd over an 11.4° range, so the canonical rotation it
+exercises is near-identity and reduces per-eye orientation spread by only 2–10%. Any collection
+intended to exercise roll must deliberately include roll variation, which the current five-pose
+plan does not produce. Separately, inter-eye axis disagreement is pose-structured and largest where
+the lid collapses the contour — median 2.9°/3.3° in the turned blocks against 13.6°/16.7° in
+lookDown/lookUp — and since the shared rotation is a circular mean of both axes, the vertical
+blocks are rotated using the least reliable contours in the session. Disagreement is already
+recorded and is a usable reliability gate; eye openness is not a substitute for it (r = +0.04,
+against r = +0.75 for `|head pitch|`).
 
 If the pitch contract is resolved, any compact comparison must be predeclared, use only cleared
 first-party data and random initialization, preserve the fixed session roles and exact gates, and

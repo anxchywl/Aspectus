@@ -40,6 +40,24 @@ circular mean of their axes as one rotation and `1.8 ×` the larger axis length 
 each crop remains centred on its own axis midpoint and is sampled to `60 × 60` through the same
 explicit edge-clamped affine contract.
 
+That shared scale is the `canonical-paired-eye-v1` defect. Verifying the rendered pixels of the one
+recorded schema-4 session against this contract confirmed the renderer is exact — the per-eye axis
+midpoint lands at the crop centre to 2.8e-14 px and the longer axis at exactly `60 / 1.8` px — but
+one shared side taken from the longer axis means head yaw foreshortens the far eye into a smaller
+rendering: `33.33 px` against `24.5 px` in the turned blocks, a `0.736` ratio tracking
+`cos|head yaw|` at `r = +0.980`, so a single eye spans a ~40% scale range across a session. Head
+yaw is correlated with the gaze label by construction of the pose plan, so crop zoom encodes the
+target. The recomputed alignment evidence cannot catch this: the arithmetic is exact and the defect
+is in the contract's definition.
+
+`canonical-paired-eye-v2` therefore changes one declared factor — the crop side becomes `1.8 ×`
+that eye's own axis length, making rendered scale invariant by construction and `crop_side_px`
+per-eye. It drops the relative-eye-size cue, which head pose already supplies numerically. Source
+frames are not retained, so the recorded v1 session cannot be re-rendered and is superseded rather
+than repairable; the contract must be settled before further collection, not after. Roll
+normalization stays unvalidated under either version, because that session holds head roll to
+`1.68°` sd and the rotation it exercises is near-identity.
+
 Session metadata binds source dimensions, crop sampling, the physical-lens angular labels and the
 Apple Vision revision-3 head-pose convention. Per-sample evidence includes contour and pupil counts
 and source, raw eye-axis endpoints, paired rotation, axis disagreement, crop side and geometric
