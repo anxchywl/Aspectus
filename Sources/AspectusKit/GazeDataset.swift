@@ -348,7 +348,10 @@ public enum GazeDatasetRejection: String, Codable, Sendable, Equatable, CaseIter
     case eyesClosed
     case headPoseUnavailable
     case headPose
+    /// not far enough in the prompted direction
     case posePrompt
+    /// past the bound the trainer would discard, so coaching must reverse rather than repeat
+    case posePromptOvershoot
     case degenerateEyes
     case eyeAlignment
 }
@@ -390,49 +393,61 @@ public struct GazePosePromptGate: Sendable, Equatable {
 
     public init(config: Config = .init()) { self.config = config }
 
-    public mutating func accepts(_ prompt: GazePosePrompt,
-                                 yawDegrees: Double, pitchDegrees: Double,
-                                 rollDegrees: Double) -> Bool {
+    /// Distinguishes the two ways a prompt can fail, because a bounded gate that only ever says
+    /// "move farther" deadlocks: a participant already past the bound would be coached further
+    /// past it and the block could never complete.
+    public enum Outcome: Sendable, Equatable {
+        case accepted
+        case insufficient
+        case overshoot
+    }
+
+    public mutating func evaluate(_ prompt: GazePosePrompt,
+                                  yawDegrees: Double, pitchDegrees: Double,
+                                  rollDegrees: Double) -> Outcome {
         switch prompt {
         case .neutral:
             neutralYawTotal += yawDegrees
             neutralPitchTotal += pitchDegrees
             neutralRollTotal += rollDegrees
             neutralSamples += 1
-            return true
+            return .accepted
         case .turnLeft:
-            guard let baseline = neutralYaw else { return false }
+            guard let baseline = neutralYaw else { return .insufficient }
             let change = yawDegrees - baseline
-            guard abs(change) >= config.minimumHorizontalChangeDegrees else { return false }
+            guard abs(change) >= config.minimumHorizontalChangeDegrees else {
+                return .insufficient
+            }
             if leftYawSign == nil { leftYawSign = change.sign == .minus ? -1 : 1 }
-            return change * (leftYawSign ?? 0) > 0
+            return change * (leftYawSign ?? 0) > 0 ? .accepted : .insufficient
         case .turnRight:
-            guard let baseline = neutralYaw, let leftYawSign else { return false }
+            guard let baseline = neutralYaw, let leftYawSign else { return .insufficient }
             let change = yawDegrees - baseline
             return abs(change) >= config.minimumHorizontalChangeDegrees
-                && change * leftYawSign < 0
+                && change * leftYawSign < 0 ? .accepted : .insufficient
         case .lookUp:
-            guard let baseline = neutralPitch else { return false }
+            guard let baseline = neutralPitch else { return .insufficient }
             let change = pitchDegrees - baseline
-            return change <= -config.minimumVerticalChangeDegrees
+            return change <= -config.minimumVerticalChangeDegrees ? .accepted : .insufficient
         case .lookDown:
-            guard let baseline = neutralPitch else { return false }
+            guard let baseline = neutralPitch else { return .insufficient }
             let change = pitchDegrees - baseline
-            return change >= config.minimumVerticalChangeDegrees
+            return change >= config.minimumVerticalChangeDegrees ? .accepted : .insufficient
         case .tiltLeft:
-            return accepts(rollDegrees: rollDegrees, sign: Self.tiltLeftRollSign)
+            return tilt(rollDegrees: rollDegrees, sign: Self.tiltLeftRollSign)
         case .tiltRight:
-            return accepts(rollDegrees: rollDegrees, sign: -Self.tiltLeftRollSign)
+            return tilt(rollDegrees: rollDegrees, sign: -Self.tiltLeftRollSign)
         }
     }
 
     /// requires the prompted direction and enough change, then keeps the sample inside the
-    /// trainer's absolute-roll filter rather than coaching the participant past it
-    private func accepts(rollDegrees: Double, sign: Double) -> Bool {
-        guard let baseline = neutralRoll else { return false }
+    /// trainer's absolute-roll filter rather than coaching the participant past it. Overshoot is
+    /// reported separately so the coaching can tell the participant to ease back.
+    private func tilt(rollDegrees: Double, sign: Double) -> Outcome {
+        guard let baseline = neutralRoll else { return .insufficient }
+        if abs(rollDegrees) > config.maximumAbsoluteRollDegrees { return .overshoot }
         let change = (rollDegrees - baseline) * sign
-        return change >= config.minimumRollChangeDegrees
-            && abs(rollDegrees) <= config.maximumAbsoluteRollDegrees
+        return change >= config.minimumRollChangeDegrees ? .accepted : .insufficient
     }
 
     private var neutralYaw: Double? {

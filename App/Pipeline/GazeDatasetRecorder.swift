@@ -251,11 +251,12 @@ final class GazeDatasetRecorder: @unchecked Sendable {
             }
             guard let tracking else { return (nil, nil) }
             let degrees = 180.0 / Double.pi
-            let poseAccepted = session.posePromptGate.accepts(
+            let poseOutcome = session.posePromptGate.evaluate(
                 target.pose,
                 yawDegrees: tracking.headPose.yaw * degrees,
                 pitchDegrees: tracking.headPose.pitch * degrees,
                 rollDegrees: tracking.headPose.roll * degrees)
+            let poseAccepted = poseOutcome == .accepted
             let previousPose = session.targetIndex > 0
                 ? session.targets[session.targetIndex - 1].pose : nil
             let settle = target.kind == .lens ? GazeDatasetPlan.lensSettleSeconds
@@ -263,7 +264,9 @@ final class GazeDatasetRecorder: @unchecked Sendable {
                 : GazeDatasetPlan.poseTransitionSettleSeconds
             guard session.settleGate.isReady(targetID: target.id, accepted: poseAccepted,
                                               now: now, settleSeconds: settle) else {
-                session.rejection = poseAccepted ? nil : .posePrompt
+                session.rejection = poseOutcome == .overshoot
+                    ? .posePromptOvershoot
+                    : poseAccepted ? nil : .posePrompt
                 state.session = session
                 return (nil, nil)
             }

@@ -222,6 +222,7 @@ struct GazeDatasetView: View {
         case .headPoseUnavailable: return "hold your face clearly in view"
         case .headPose: return "turn your head less"
         case .posePrompt: return "move farther in the requested head direction"
+        case .posePromptOvershoot: return "ease back toward centre; that is farther than needed"
         case .degenerateEyes: return "move a little closer"
         case .eyeAlignment: return "keep both eyes clearly visible"
         }
