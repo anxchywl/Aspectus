@@ -73,35 +73,55 @@ struct GazeDatasetView: View {
     }
 
     private var setup: some View {
-        VStack(spacing: 22) {
-            Image(systemName: "eye.square")
-                .font(.system(size: 54)).foregroundStyle(.cyan)
-            Text("Collect gaze model data").font(.largeTitle.weight(.semibold))
+        // centred as a pair rather than stretched to the window: full screen is a very tall canvas
+        // for a setup form, and pinning the actions to the bottom edge strands them
+        HStack(alignment: .top, spacing: 36) {
+            setupDetails.frame(width: 520, alignment: .leading)
+            setupPreview.frame(width: 500, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .padding(44)
+    }
+
+    private var setupDetails: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 14) {
+                Image(systemName: "eye.square")
+                    .font(.system(size: 38)).foregroundStyle(.cyan)
+                Text("Collect gaze model data").font(.largeTitle.weight(.semibold))
+            }
             Text("A dot will move across the display while you hold "
                  + "\(GazePosePrompt.allCases.count) gentle head positions. "
                  + "Look at the dot with your eyes and keep the requested head position steady.")
                 .font(.title3).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center).frame(maxWidth: 680)
+                .fixedSize(horizontal: false, vertical: true)
 
-            Picker("Session", selection: $split) {
-                Text("Training").tag(GazeDatasetSplit.training)
-                Text("Validation").tag(GazeDatasetSplit.validation)
+            // an unlabelled segmented control disappears into the black background whenever the
+            // window is not key, and this choice decides which slot the session fills
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Session role").font(.callout.weight(.medium))
+                Picker("Session role", selection: $split) {
+                    Text("Training").tag(GazeDatasetSplit.training)
+                    Text("Validation").tag(GazeDatasetSplit.validation)
+                }
+                .pickerStyle(.segmented).frame(width: 320)
+                .labelsHidden()
             }
-            .pickerStyle(.segmented).frame(width: 340)
+            .padding(.horizontal, 14).padding(.vertical, 11)
+            .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 9) {
                 Label("\(GazeDatasetPlan.totalSamples) labelled samples in six to nine minutes",
                       systemImage: "clock")
-                Label("aligned eye crops, head pose, gaze labels and crop-quality metadata; no full-face images",
-                      systemImage: "crop")
+                Label("aligned eye crops, head pose, gaze labels and crop-quality metadata; "
+                      + "no full-face images", systemImage: "crop")
                 Label("stored only in your private Application Support folder",
                       systemImage: "lock")
                 Label("keep your usual glasses and normal call lighting",
                       systemImage: "lightbulb")
             }
             .font(.callout).foregroundStyle(.secondary)
-
-            postureCheck
+            .fixedSize(horizontal: false, vertical: true)
 
             Text(recorded.training + recorded.validation == 0
                  ? "no schema-\(GazeDatasetSchema5.version) sessions recorded yet"
@@ -110,41 +130,75 @@ struct GazeDatasetView: View {
                 .font(.callout.monospaced()).foregroundStyle(.tertiary)
 
             if let error = controller.datasetError {
-                Text(error).font(.callout).foregroundStyle(.orange)
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(.orange)
             }
 
-            HStack(spacing: 12) {
-                Button("Close") { dismissWindow(id: "gaze-dataset") }
-                if isFullScreen {
-                    Button("Start \(split == .training ? "training" : "validation") session") {
-                        controller.startGazeDataset(split)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!controller.isRunning)
-                    .help(controller.isRunning
-                          ? "Begin collecting" : "The camera has to be running first")
-                } else {
-                    Button("Enter full screen") { datasetWindow?.toggleFullScreen(nil) }
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    if isFullScreen {
+                        Button("Start \(split == .training ? "training" : "validation") session") {
+                            controller.startGazeDataset(split)
+                        }
                         .buttonStyle(.borderedProminent)
+                        .disabled(!controller.isRunning)
+                        .help(controller.isRunning
+                              ? "Begin collecting" : "The camera has to be running first")
+                    } else {
+                        Button("Enter full screen") { datasetWindow?.toggleFullScreen(nil) }
+                            .buttonStyle(.borderedProminent)
+                    }
+                    Button("Close") { dismissWindow(id: "gaze-dataset") }
                 }
-            }
 
-            if !isFullScreen {
-                Text("Collection starts after this window enters full screen.")
-                    .font(.caption).foregroundStyle(.orange)
-            }
+                if !isFullScreen {
+                    Text("Collection starts after this window enters full screen.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
 
-            HStack(spacing: 12) {
-                Button("Reveal collected data") { revealData() }
+                HStack(spacing: 12) {
+                    Button("Reveal collected data") { revealData() }
+                        .disabled(!hasCollectedData)
+                    Button("Delete collected data", role: .destructive) {
+                        confirmingDelete = true
+                    }
                     .disabled(!hasCollectedData)
-                Button("Delete collected data", role: .destructive) {
-                    confirmingDelete = true
                 }
-                .disabled(!hasCollectedData)
+                .font(.caption)
             }
-            .font(.caption)
         }
-        .padding(40)
+    }
+
+    /// the picture answers the questions the numbers cannot: whether the framing, lighting and
+    /// distance are right before committing to a nine-minute session
+    private var setupPreview: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ZStack {
+                Color.black
+                if controller.isRunning {
+                    MetalPreviewView(controller: controller, secondary: true)
+                    if controller.showOverlay {
+                        TrackingOverlay(model: controller.overlay,
+                                        mirror: controller.mirrorPreview)
+                    }
+                } else {
+                    VStack(spacing: 10) {
+                        Image(systemName: "video.slash").font(.system(size: 30))
+                        Text("camera off").font(.callout)
+                    }
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(.white.opacity(0.12), lineWidth: 1)
+            )
+            .environment(\.colorScheme, .dark)
+
+            postureCheck
+        }
     }
 
     /// live seating check, so an unreachable pose block is caught here rather than at block five
@@ -154,7 +208,7 @@ struct GazeDatasetView: View {
             let posture = GazeDatasetPosture(yawDegrees: sample.headYawDegrees,
                                              pitchDegrees: sample.headPitchDegrees,
                                              rollDegrees: sample.headRollDegrees)
-            VStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 6) {
                 Label(posture.isReady
                       ? "seating leaves room for every head position"
                       : "this seating cannot complete every block",
@@ -169,16 +223,17 @@ struct GazeDatasetView: View {
                 if let advice = posture.advice {
                     Text(advice)
                         .font(.callout).foregroundStyle(.orange)
-                        .multilineTextAlignment(.center).frame(maxWidth: 560)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 18).padding(.vertical, 12)
             .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
             .animation(.easeInOut(duration: 0.25), value: posture.isReady)
         } else {
             // without tracking there is nothing to check, and silently omitting the panel would
             // read as a pass rather than as an unanswered question
-            VStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 10) {
                 Label(controller.isRunning
                       ? "waiting for the tracker to find your face"
                       : "the camera is off, so collection cannot start",
@@ -190,6 +245,7 @@ struct GazeDatasetView: View {
                         .buttonStyle(.bordered)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 18).padding(.vertical, 12)
             .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
         }

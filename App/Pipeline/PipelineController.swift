@@ -178,6 +178,8 @@ final class PipelineController: ObservableObject {
     /// an output, never a dependency: if it is absent or fails the preview carries on untouched
     private let virtualCamera = VirtualCameraSink()
     private weak var renderer: MetalRenderer?
+    /// the main window's renderer, kept so a borrowed preview can hand the frames back
+    private weak var primaryRenderer: MetalRenderer?
 
     // fps meters ticked on each event and read on the stats timer, so a stall reads as a stall
     private var processMeter = RateMeter()
@@ -525,7 +527,25 @@ final class PipelineController: ObservableObject {
         }
     }
 
+    /// The frame loop feeds one renderer. A second preview therefore has to borrow it and give it
+    /// back, or opening the collection window would leave the main preview dark for the rest of
+    /// the launch.
+    func attachSecondary(renderer: MetalRenderer) {
+        attach(renderer: renderer, primary: false)
+    }
+
+    func detachSecondary() {
+        guard let primaryRenderer else { return }
+        renderer = primaryRenderer
+        primaryRenderer.mirror = mirrorPreview
+    }
+
     func attach(renderer: MetalRenderer) {
+        attach(renderer: renderer, primary: true)
+    }
+
+    private func attach(renderer: MetalRenderer, primary: Bool) {
+        if primary { primaryRenderer = renderer }
         self.renderer = renderer
         renderer.mirror = mirrorPreview
         // metrics are lock-protected and the meter is main-actor, so only the meter needs a hop
