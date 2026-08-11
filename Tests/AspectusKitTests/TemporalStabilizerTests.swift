@@ -70,6 +70,23 @@ final class TemporalStabilizerTests: XCTestCase {
         XCTAssertLessThan(filtered.leftEye.cornerMidpointY ?? 1, 0.51)
     }
 
+    func testEyeAxisEvidenceSurvivesLandmarkSmoothing() throws {
+        var s = TemporalStabilizer()
+        var first = result(pupilX: 0.43)
+        first.leftEye.contourPointCount = 8
+        first.leftEye.imageAxisStart = .init(x: 0.40, y: 0.40)
+        first.leftEye.imageAxisEnd = .init(x: 0.46, y: 0.42)
+        _ = s.stabilize(first, t: 0)
+
+        first.leftEye.imageAxisStart = .init(x: 0.42, y: 0.40)
+        first.leftEye.imageAxisEnd = .init(x: 0.48, y: 0.42)
+        let filtered = s.stabilize(first, t: 1.0 / 30.0)
+
+        XCTAssertEqual(filtered.leftEye.contourPointCount, 8)
+        XCTAssertLessThan(try XCTUnwrap(filtered.leftEye.imageAxisStart).x, 0.42)
+        XCTAssertLessThan(try XCTUnwrap(filtered.leftEye.imageAxisEnd).x, 0.48)
+    }
+
     func testResetMakesTheNextSamplePassThrough() {
         var s = TemporalStabilizer()
         for i in 0..<30 { _ = s.stabilize(result(pupilX: 0.43), t: Double(i) / 30.0) }

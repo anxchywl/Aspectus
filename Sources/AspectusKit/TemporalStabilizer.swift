@@ -45,16 +45,30 @@ public struct TemporalStabilizer: Sendable {
         var region: RectFilter
         var pupil: OneEuroPointFilter
         var cornerMidpointY: OneEuroFilter
+        var axisStart: OneEuroPointFilter
+        var axisEnd: OneEuroPointFilter
 
         init(_ t: OneEuroTuning) {
             region = RectFilter(t)
             pupil = OneEuroPointFilter(minCutoff: t.minCutoff, beta: t.beta, dCutoff: t.dCutoff)
             cornerMidpointY = OneEuroFilter(minCutoff: t.minCutoff, beta: t.beta,
                                             dCutoff: t.dCutoff)
+            axisStart = OneEuroPointFilter(minCutoff: t.minCutoff, beta: t.beta,
+                                           dCutoff: t.dCutoff)
+            axisEnd = OneEuroPointFilter(minCutoff: t.minCutoff, beta: t.beta,
+                                         dCutoff: t.dCutoff)
         }
 
         mutating func filter(_ e: EyeObservation, t: Double) -> EyeObservation {
             let p = pupil.filter(x: e.pupilCenter.x, y: e.pupilCenter.y, t: t)
+            let start = e.imageAxisStart.map {
+                axisStart.filter(x: $0.x, y: $0.y, t: t)
+            }
+            let end = e.imageAxisEnd.map {
+                axisEnd.filter(x: $0.x, y: $0.y, t: t)
+            }
+            if start == nil { axisStart.reset() }
+            if end == nil { axisEnd.reset() }
             return EyeObservation(region: region.filter(e.region, t: t),
                                   pupilCenter: NormPoint(x: p.x, y: p.y),
                                   openness: e.openness,
@@ -62,10 +76,16 @@ public struct TemporalStabilizer: Sendable {
                                   pupilPointCount: e.pupilPointCount,
                                   cornerMidpointY: e.cornerMidpointY.map {
                                       cornerMidpointY.filter($0, t: t)
-                                  })
+                                  },
+                                  contourPointCount: e.contourPointCount,
+                                  imageAxisStart: start.map { NormPoint(x: $0.x, y: $0.y) },
+                                  imageAxisEnd: end.map { NormPoint(x: $0.x, y: $0.y) })
         }
 
-        mutating func reset() { region.reset(); pupil.reset(); cornerMidpointY.reset() }
+        mutating func reset() {
+            region.reset(); pupil.reset(); cornerMidpointY.reset()
+            axisStart.reset(); axisEnd.reset()
+        }
     }
 
     public private(set) var config: Config

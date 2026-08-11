@@ -5,6 +5,21 @@ public enum GazeDatasetSplit: String, Codable, Sendable, CaseIterable {
     case validation
 }
 
+public enum GazeDatasetSchema4 {
+    public static let version = 4
+    public static let manifestColumns = [
+        "schema_version", "participant_id", "session_id", "split", "sample", "frame_id",
+        "elapsed_s", "target_id", "target_kind", "target_x", "target_y", "target_yaw_deg",
+        "target_pitch_deg", "pose_prompt", "head_yaw_deg", "head_pitch_deg", "head_roll_deg",
+        "face_conf", "open_l", "open_r", "left_image", "right_image", "contour_points_l",
+        "contour_points_r", "pupil_source_l", "pupil_source_r", "pupil_points_l",
+        "pupil_points_r", "axis_start_x_l", "axis_start_y_l", "axis_end_x_l", "axis_end_y_l",
+        "axis_start_x_r", "axis_start_y_r", "axis_end_x_r", "axis_end_y_r",
+        "alignment_rotation_deg", "alignment_disagreement_deg", "crop_side_px",
+        "crop_clipped_fraction_l", "crop_clipped_fraction_r",
+    ]
+}
+
 public enum GazePosePrompt: String, Codable, Sendable, CaseIterable {
     case neutral
     case turnLeft
@@ -105,6 +120,209 @@ public struct GazeDatasetGeometry: Codable, Sendable, Equatable {
     }
 }
 
+public struct GazeDatasetCropContract: Codable, Sendable, Equatable {
+    public var version: Int
+    public var coordinateSpace: String
+    public var axisExtractor: String
+    public var alignment: String
+    public var center: String
+    public var scale: String
+    public var outputWidth: Int
+    public var outputHeight: Int
+    public var sampling: String
+    public var colorSpace: String
+
+    public static let canonicalPairedEyesV1 = GazeDatasetCropContract(
+        version: 1,
+        coordinateSpace: "source-image-fraction-top-left",
+        axisExtractor: "farthest-contour-pair-ordered-image-x",
+        alignment: "circular-mean-paired-eye-axes",
+        center: "per-eye-axis-midpoint",
+        scale: "\(GazeDatasetCanonicalAlignment.cropScale)x-maximum-eye-axis-length-pixels",
+        outputWidth: GazeDatasetCanonicalAlignment.outputWidth,
+        outputHeight: GazeDatasetCanonicalAlignment.outputHeight,
+        sampling: "core-image-affine-hq-downsample-edge-clamp",
+        colorSpace: "sRGB")
+}
+
+public struct GazeDatasetLabelContract: Codable, Sendable, Equatable {
+    public var version: Int
+    public var units: String
+    public var origin: String
+    public var yawPositive: String
+    public var pitchPositive: String
+
+    public static let lensAngularV1 = GazeDatasetLabelContract(
+        version: 1,
+        units: "degrees",
+        origin: "physical-lens",
+        yawPositive: "subject-right",
+        pitchPositive: "up")
+}
+
+public struct GazeDatasetHeadPoseContract: Codable, Sendable, Equatable {
+    public var version: Int
+    public var source: String
+    public var units: String
+    public var order: String
+    public var yawPositive: String
+    public var pitchPositive: String
+    public var rollPositive: String
+
+    public static let visionRevision3DegreesV1 = GazeDatasetHeadPoseContract(
+        version: 1,
+        source: "Vision.VNFaceObservation.face-rectangles-revision-3",
+        units: "degrees",
+        order: "yaw-pitch-roll",
+        yawPositive: "counterclockwise",
+        pitchPositive: "head-down",
+        rollPositive: "counterclockwise")
+}
+
+public struct GazeDatasetCanonicalAlignment: Sendable, Equatable {
+    public struct EyeCrop: Sendable, Equatable {
+        public var centerX: Double
+        public var centerY: Double
+        public var clippedFraction: Double
+    }
+
+    public static let cropScale = 1.8
+    public static let outputWidth = 60
+    public static let outputHeight = 60
+
+    public var rotationRadians: Double
+    public var disagreementDegrees: Double
+    public var cropSidePixels: Double
+    public var left: EyeCrop
+    public var right: EyeCrop
+
+    public init?(left: EyeObservation, right: EyeObservation,
+                 imageWidth: Int, imageHeight: Int) {
+        guard imageWidth > 0, imageHeight > 0,
+              left.contourPointCount >= 2, right.contourPointCount >= 2,
+              let leftStart = left.imageAxisStart, let leftEnd = left.imageAxisEnd,
+              let rightStart = right.imageAxisStart, let rightEnd = right.imageAxisEnd else {
+            return nil
+        }
+        let width = Double(imageWidth)
+        let height = Double(imageHeight)
+        let values = [
+            leftStart.x, leftStart.y, leftEnd.x, leftEnd.y,
+            rightStart.x, rightStart.y, rightEnd.x, rightEnd.y,
+        ]
+        guard values.allSatisfy(\.isFinite) else { return nil }
+
+        let leftAxis = Self.axis(start: leftStart, end: leftEnd,
+                                 width: width, height: height)
+        let rightAxis = Self.axis(start: rightStart, end: rightEnd,
+                                  width: width, height: height)
+        guard leftAxis.length > 1e-6, rightAxis.length > 1e-6 else { return nil }
+        let sine = sin(leftAxis.angle) + sin(rightAxis.angle)
+        let cosine = cos(leftAxis.angle) + cos(rightAxis.angle)
+        guard hypot(sine, cosine) > 1e-6 else { return nil }
+
+        rotationRadians = atan2(sine, cosine)
+        disagreementDegrees = abs(atan2(sin(leftAxis.angle - rightAxis.angle),
+                                        cos(leftAxis.angle - rightAxis.angle))) * 180 / .pi
+        cropSidePixels = Self.cropScale * max(leftAxis.length, rightAxis.length)
+        guard cropSidePixels.isFinite, cropSidePixels > 1e-6 else { return nil }
+        self.left = EyeCrop(
+            centerX: leftAxis.center.x,
+            centerY: leftAxis.center.y,
+            clippedFraction: Self.clippedFraction(
+                center: leftAxis.center, rotation: rotationRadians,
+                side: cropSidePixels, width: width, height: height))
+        self.right = EyeCrop(
+            centerX: rightAxis.center.x,
+            centerY: rightAxis.center.y,
+            clippedFraction: Self.clippedFraction(
+                center: rightAxis.center, rotation: rotationRadians,
+                side: cropSidePixels, width: width, height: height))
+    }
+
+    private struct Point {
+        var x: Double
+        var y: Double
+    }
+
+    private static func axis(start: NormPoint, end: NormPoint,
+                             width: Double, height: Double)
+        -> (center: Point, length: Double, angle: Double) {
+        let first = Point(x: start.x * width, y: start.y * height)
+        let second = Point(x: end.x * width, y: end.y * height)
+        let dx = second.x - first.x
+        let dy = second.y - first.y
+        return (Point(x: (first.x + second.x) / 2,
+                      y: (first.y + second.y) / 2),
+                hypot(dx, dy), atan2(dy, dx))
+    }
+
+    private static func clippedFraction(center: Point, rotation: Double,
+                                        side: Double, width: Double, height: Double) -> Double {
+        let half = side / 2
+        let axis = Point(x: cos(rotation), y: sin(rotation))
+        let perpendicular = Point(x: -axis.y, y: axis.x)
+        var polygon = [
+            Point(x: center.x - half * axis.x - half * perpendicular.x,
+                  y: center.y - half * axis.y - half * perpendicular.y),
+            Point(x: center.x + half * axis.x - half * perpendicular.x,
+                  y: center.y + half * axis.y - half * perpendicular.y),
+            Point(x: center.x + half * axis.x + half * perpendicular.x,
+                  y: center.y + half * axis.y + half * perpendicular.y),
+            Point(x: center.x - half * axis.x + half * perpendicular.x,
+                  y: center.y - half * axis.y + half * perpendicular.y),
+        ]
+        polygon = clip(polygon, inside: { $0.x >= 0 }, vertical: 0)
+        polygon = clip(polygon, inside: { $0.x <= width }, vertical: width)
+        polygon = clip(polygon, inside: { $0.y >= 0 }, horizontal: 0)
+        polygon = clip(polygon, inside: { $0.y <= height }, horizontal: height)
+        let visible = polygonArea(polygon)
+        return min(1, max(0, 1 - visible / (side * side)))
+    }
+
+    private static func clip(_ polygon: [Point], inside: (Point) -> Bool,
+                             vertical boundary: Double) -> [Point] {
+        clip(polygon, inside: inside) { first, second in
+            let dx = second.x - first.x
+            let amount = abs(dx) > 1e-12 ? (boundary - first.x) / dx : 0
+            return Point(x: boundary, y: first.y + amount * (second.y - first.y))
+        }
+    }
+
+    private static func clip(_ polygon: [Point], inside: (Point) -> Bool,
+                             horizontal boundary: Double) -> [Point] {
+        clip(polygon, inside: inside) { first, second in
+            let dy = second.y - first.y
+            let amount = abs(dy) > 1e-12 ? (boundary - first.y) / dy : 0
+            return Point(x: first.x + amount * (second.x - first.x), y: boundary)
+        }
+    }
+
+    private static func clip(_ polygon: [Point], inside: (Point) -> Bool,
+                             intersection: (Point, Point) -> Point) -> [Point] {
+        guard var previous = polygon.last else { return [] }
+        var result: [Point] = []
+        for current in polygon {
+            if inside(current) {
+                if !inside(previous) { result.append(intersection(previous, current)) }
+                result.append(current)
+            } else if inside(previous) {
+                result.append(intersection(previous, current))
+            }
+            previous = current
+        }
+        return result
+    }
+
+    private static func polygonArea(_ polygon: [Point]) -> Double {
+        guard polygon.count >= 3 else { return 0 }
+        return abs(polygon.indices.reduce(0.0) { total, index in
+            let next = polygon[(index + 1) % polygon.count]
+            return total + polygon[index].x * next.y - next.x * polygon[index].y
+        }) / 2
+    }
+}
+
 public enum GazeDatasetRejection: String, Codable, Sendable, Equatable, CaseIterable {
     case noTracking
     case lowConfidence
@@ -113,6 +331,7 @@ public enum GazeDatasetRejection: String, Codable, Sendable, Equatable, CaseIter
     case headPose
     case posePrompt
     case degenerateEyes
+    case eyeAlignment
 }
 
 /// verifies that prompted head positions add real pose coverage instead of relying on instructions
@@ -133,7 +352,6 @@ public struct GazePosePromptGate: Sendable, Equatable {
     private var neutralPitchTotal = 0.0
     private var neutralSamples = 0
     private var leftYawSign: Double?
-    private var upPitchSign: Double?
 
     public init(config: Config = .init()) { self.config = config }
 
@@ -159,14 +377,11 @@ public struct GazePosePromptGate: Sendable, Equatable {
         case .lookUp:
             guard let baseline = neutralPitch else { return false }
             let change = pitchDegrees - baseline
-            guard abs(change) >= config.minimumVerticalChangeDegrees else { return false }
-            if upPitchSign == nil { upPitchSign = change.sign == .minus ? -1 : 1 }
-            return change * (upPitchSign ?? 0) > 0
+            return change <= -config.minimumVerticalChangeDegrees
         case .lookDown:
-            guard let baseline = neutralPitch, let upPitchSign else { return false }
+            guard let baseline = neutralPitch else { return false }
             let change = pitchDegrees - baseline
-            return abs(change) >= config.minimumVerticalChangeDegrees
-                && change * upPitchSign < 0
+            return change >= config.minimumVerticalChangeDegrees
         }
     }
 
@@ -224,6 +439,7 @@ public enum GazeDatasetAcceptance {
     }
 
     public static func rejection(_ tracking: TrackingResult?,
+                                 imageWidth: Int? = nil, imageHeight: Int? = nil,
                                  config: Config = .init()) -> GazeDatasetRejection? {
         guard let tracking else { return .noTracking }
         guard tracking.confidence >= config.minimumFaceConfidence else { return .lowConfidence }
@@ -239,6 +455,14 @@ public enum GazeDatasetAcceptance {
               roll <= config.maximumHeadRollDegrees else { return .headPose }
         guard usableImageRegion(tracking.leftEye.region),
               usableImageRegion(tracking.rightEye.region) else { return .degenerateEyes }
+        if imageWidth != nil || imageHeight != nil {
+            guard let imageWidth, let imageHeight,
+                  GazeDatasetCanonicalAlignment(
+                    left: tracking.leftEye, right: tracking.rightEye,
+                    imageWidth: imageWidth, imageHeight: imageHeight) != nil else {
+                return .eyeAlignment
+            }
+        }
         return nil
     }
 

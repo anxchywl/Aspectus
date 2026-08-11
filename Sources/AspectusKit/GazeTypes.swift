@@ -39,18 +39,49 @@ public struct EyeObservation: Sendable {
     public var openness: Double          // 0 closed (blink), 1 fully open
     public var pupilSource: PupilSource
     public var pupilPointCount: Int      // landmark points behind pupilCenter, 0 for a fallback
+    public var contourPointCount: Int
+    public var imageAxisStart: NormPoint?
+    public var imageAxisEnd: NormPoint?
     public init(region: NormRect, pupilCenter: NormPoint, openness: Double,
                 pupilSource: PupilSource = .none, pupilPointCount: Int = 0,
-                cornerMidpointY: Double? = nil) {
+                cornerMidpointY: Double? = nil, contourPointCount: Int = 0,
+                imageAxisStart: NormPoint? = nil, imageAxisEnd: NormPoint? = nil) {
         self.region = region; self.pupilCenter = pupilCenter; self.openness = openness
         self.pupilSource = pupilSource; self.pupilPointCount = pupilPointCount
         self.cornerMidpointY = cornerMidpointY
+        self.contourPointCount = contourPointCount
+        self.imageAxisStart = imageAxisStart
+        self.imageAxisEnd = imageAxisEnd
     }
 
     public static func cornerMidpointY(of contour: [NormPoint]) -> Double? {
         guard let left = contour.min(by: { $0.x < $1.x }),
               let right = contour.max(by: { $0.x < $1.x }) else { return nil }
         return (left.y + right.y) / 2
+    }
+
+    public static func imageAxis(of contour: [NormPoint], imageWidth: Int, imageHeight: Int)
+        -> (start: NormPoint, end: NormPoint)? {
+        guard contour.count >= 2, imageWidth > 0, imageHeight > 0 else { return nil }
+        let width = Double(imageWidth)
+        let height = Double(imageHeight)
+        var farthest: (NormPoint, NormPoint, Double)?
+        for firstIndex in contour.indices {
+            for secondIndex in contour.indices where secondIndex > firstIndex {
+                let first = contour[firstIndex]
+                let second = contour[secondIndex]
+                let dx = (second.x - first.x) * width
+                let dy = (second.y - first.y) * height
+                let distanceSquared = dx * dx + dy * dy
+                if farthest == nil || distanceSquared > farthest!.2 {
+                    farthest = (first, second, distanceSquared)
+                }
+            }
+        }
+        guard let farthest, farthest.2 > 0 else { return nil }
+        let ordered = farthest.0.x < farthest.1.x
+            || (farthest.0.x == farthest.1.x && farthest.0.y <= farthest.1.y)
+        return ordered ? (farthest.0, farthest.1) : (farthest.1, farthest.0)
     }
 
     /// pupil displacement from the horizontal aperture centre and vertical corner line
