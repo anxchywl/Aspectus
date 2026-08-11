@@ -75,7 +75,7 @@ struct GazeDatasetView: View {
         // centred as a pair rather than stretched to the window: full screen is a very tall canvas
         // for a setup form, and pinning the actions to the bottom edge strands them
         VStack(spacing: 28) {
-            HStack(alignment: .top, spacing: 36) {
+            HStack(alignment: .center, spacing: 36) {
                 setupDetails.frame(width: 520, alignment: .leading)
                 setupPreview.frame(width: 500, alignment: .leading)
             }
@@ -234,7 +234,7 @@ struct GazeDatasetView: View {
             let posture = GazeDatasetPosture(yawDegrees: sample.headYawDegrees,
                                              pitchDegrees: sample.headPitchDegrees,
                                              rollDegrees: sample.headRollDegrees)
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .center, spacing: 6) {
                 Label(posture.isReady
                       ? "seating leaves room for every head position"
                       : "this seating cannot complete every block",
@@ -249,17 +249,18 @@ struct GazeDatasetView: View {
                 if let advice = posture.advice {
                     Text(advice)
                         .font(.callout).foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: Self.postureCheckHeight, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: Self.postureCheckHeight, alignment: .center)
             .padding(.horizontal, 18).padding(.vertical, 12)
             .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
             .animation(.easeInOut(duration: 0.25), value: posture.isReady)
         } else {
             // without tracking there is nothing to check, and silently omitting the panel would
             // read as a pass rather than as an unanswered question
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .center, spacing: 10) {
                 Label(controller.isRunning
                       ? "waiting for the tracker to find your face"
                       : "the camera is off, so collection cannot start",
@@ -271,7 +272,7 @@ struct GazeDatasetView: View {
                         .buttonStyle(.bordered)
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: Self.postureCheckHeight, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: Self.postureCheckHeight, alignment: .center)
             .padding(.horizontal, 18).padding(.vertical, 12)
             .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
         }
