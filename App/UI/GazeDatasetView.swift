@@ -101,6 +101,8 @@ struct GazeDatasetView: View {
             }
             .font(.callout).foregroundStyle(.secondary)
 
+            postureCheck
+
             Text(recorded.training + recorded.validation == 0
                  ? "no schema-\(GazeDatasetSchema5.version) sessions recorded yet"
                  : "schema-\(GazeDatasetSchema5.version) sessions so far: "
@@ -140,6 +142,47 @@ struct GazeDatasetView: View {
             .font(.caption)
         }
         .padding(40)
+    }
+
+    /// live seating check, so an unreachable pose block is caught here rather than at block five
+    @ViewBuilder
+    private var postureCheck: some View {
+        if let sample = controller.gaze.latest, sample.headPoseAvailable {
+            let posture = GazeDatasetPosture(yawDegrees: sample.headYawDegrees,
+                                             pitchDegrees: sample.headPitchDegrees,
+                                             rollDegrees: sample.headRollDegrees)
+            VStack(spacing: 6) {
+                Label(posture.isReady
+                      ? "seating leaves room for every head position"
+                      : "this seating cannot complete every block",
+                      systemImage: posture.isReady
+                      ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(posture.isReady ? .green : .orange)
+                Text(String(format: "resting pose  yaw %+.0f°  pitch %+.0f°  roll %+.0f°",
+                            sample.headYawDegrees, sample.headPitchDegrees,
+                            sample.headRollDegrees))
+                    .font(.caption.monospaced()).foregroundStyle(.secondary)
+                if let advice = posture.advice {
+                    Text(advice)
+                        .font(.callout).foregroundStyle(.orange)
+                        .multilineTextAlignment(.center).frame(maxWidth: 560)
+                }
+            }
+            .padding(.horizontal, 18).padding(.vertical, 12)
+            .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+            .animation(.easeInOut(duration: 0.25), value: posture.isReady)
+        } else {
+            // without tracking there is nothing to check, and silently omitting the panel would
+            // read as a pass rather than as an unanswered question
+            Label(controller.isRunning
+                  ? "waiting for the tracker to find your face"
+                  : "start the camera to check your seating before collecting",
+                  systemImage: "video.slash")
+                .font(.callout).foregroundStyle(.secondary)
+                .padding(.horizontal, 18).padding(.vertical, 12)
+                .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+        }
     }
 
     @ViewBuilder
@@ -308,7 +351,9 @@ struct GazeDatasetView: View {
         case .lowConfidence: return "use steadier, clearer lighting"
         case .eyesClosed: return "open both eyes"
         case .headPoseUnavailable: return "hold your face clearly in view"
-        case .headPose: return "turn your head less"
+        // the limit applies to yaw, pitch and roll, so naming only turning sends a participant
+        // whose chin is too low looking for a problem with how far they have turned
+        case .headPose: return "your head is past the tracking limit; return toward level"
         case .posePrompt: return "move farther in the requested head direction"
         case .posePromptOvershoot: return "ease back toward centre; that is farther than needed"
         case .degenerateEyes: return "move a little closer"

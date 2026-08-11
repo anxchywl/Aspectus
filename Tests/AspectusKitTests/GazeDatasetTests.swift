@@ -131,6 +131,39 @@ final class GazeDatasetAcceptanceTests: XCTestCase {
     }
 }
 
+final class GazeDatasetPostureTests: XCTestCase {
+    func testLevelSeatingLeavesRoomForEveryBlock() {
+        let posture = GazeDatasetPosture(yawDegrees: 2, pitchDegrees: 4, rollDegrees: 1)
+
+        XCTAssertTrue(posture.isReady)
+        XCTAssertNil(posture.advice)
+    }
+
+    func testAHighRestingPitchCannotReachTheChinDownBlock() {
+        // the acceptance limit is absolute at 25 degrees and chin-down needs 5 degrees more pitch
+        // than neutral, so a participant resting at 21 has nowhere to go
+        let posture = GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 21, rollDegrees: 0)
+
+        XCTAssertFalse(posture.isReady)
+        XCTAssertEqual(posture.pitchHeadroom, -1, accuracy: 1e-9)
+        XCTAssertEqual(posture.advice?.contains("raise the display"), true)
+    }
+
+    func testTheAdviceNamesTheAxisWithTheLeastRoom() {
+        XCTAssertEqual(
+            GazeDatasetPosture(yawDegrees: 24, pitchDegrees: 0, rollDegrees: 0).advice?
+                .contains("square your chair"), true)
+        XCTAssertEqual(
+            GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 0, rollDegrees: 12).advice?
+                .contains("tilted to one side"), true)
+    }
+
+    func testTheBoundaryIsReachableButHasNoMargin() {
+        XCTAssertTrue(GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 20, rollDegrees: 0).isReady)
+        XCTAssertFalse(GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 20.5, rollDegrees: 0).isReady)
+    }
+}
+
 final class GazeDatasetCanonicalAlignmentTests: XCTestCase {
     private func eye(centerX: Double, centerY: Double, length: Double,
                      angleDegrees: Double, width: Double = 1280,

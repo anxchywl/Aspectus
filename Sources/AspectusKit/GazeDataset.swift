@@ -342,6 +342,47 @@ public struct GazeDatasetCanonicalAlignment: Sendable, Equatable {
     }
 }
 
+/// A pose gate measured against the participant's own neutral baseline becomes unreachable when
+/// that baseline already sits near the absolute acceptance limit. Chin-down needs five degrees more
+/// pitch than neutral while acceptance refuses beyond twenty-five degrees absolute, so a
+/// participant resting at twenty-one degrees has nowhere left to go and the block can never
+/// complete. That is a seating and camera-height problem, and it is worth catching before a session
+/// rather than six minutes into one.
+public struct GazeDatasetPosture: Sendable, Equatable {
+    public var yawHeadroom: Double
+    public var pitchHeadroom: Double
+    public var rollHeadroom: Double
+
+    public init(yawDegrees: Double, pitchDegrees: Double, rollDegrees: Double,
+                acceptance: GazeDatasetAcceptance.Config = .init(),
+                gate: GazePosePromptGate.Config = .init()) {
+        yawHeadroom = acceptance.maximumHeadPoseDegrees
+            - (abs(yawDegrees) + gate.minimumHorizontalChangeDegrees)
+        pitchHeadroom = acceptance.maximumHeadPoseDegrees
+            - (abs(pitchDegrees) + gate.minimumVerticalChangeDegrees)
+        rollHeadroom = gate.maximumAbsoluteRollDegrees
+            - (abs(rollDegrees) + gate.minimumRollChangeDegrees)
+    }
+
+    public var isReady: Bool { worstHeadroom >= 0 }
+
+    public var worstHeadroom: Double { min(yawHeadroom, min(pitchHeadroom, rollHeadroom)) }
+
+    /// names the axis with the least room and which way to move, because "reposition" on its own
+    /// does not tell anyone whether to raise the camera or turn the chair
+    public var advice: String? {
+        guard !isReady else { return nil }
+        if pitchHeadroom <= yawHeadroom && pitchHeadroom <= rollHeadroom {
+            return "your head rests too far from level vertically; raise the display or lower "
+                + "your seat until the chin-up and chin-down blocks have room"
+        }
+        if yawHeadroom <= rollHeadroom {
+            return "your head rests turned away from the camera; square your chair to the display"
+        }
+        return "your head rests tilted to one side; level it before starting"
+    }
+}
+
 public enum GazeDatasetRejection: String, Codable, Sendable, Equatable, CaseIterable {
     case noTracking
     case lowConfidence
