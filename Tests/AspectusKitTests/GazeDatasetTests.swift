@@ -2,12 +2,15 @@ import XCTest
 @testable import AspectusKit
 
 final class GazeDatasetPlanTests: XCTestCase {
-    func testSchemaFourManifestContractIsStableAndUnambiguous() {
-        XCTAssertEqual(GazeDatasetSchema4.version, 4)
-        XCTAssertEqual(GazeDatasetSchema4.manifestColumns.count, 41)
-        XCTAssertEqual(Set(GazeDatasetSchema4.manifestColumns).count, 41)
-        XCTAssertEqual(GazeDatasetSchema4.manifestColumns.first, "schema_version")
-        XCTAssertEqual(GazeDatasetSchema4.manifestColumns.last, "crop_clipped_fraction_r")
+    func testSchemaFiveManifestContractIsStableAndUnambiguous() {
+        XCTAssertEqual(GazeDatasetSchema5.version, 5)
+        XCTAssertEqual(GazeDatasetSchema5.manifestColumns.count, 42)
+        XCTAssertEqual(Set(GazeDatasetSchema5.manifestColumns).count, 42)
+        XCTAssertEqual(GazeDatasetSchema5.manifestColumns.first, "schema_version")
+        XCTAssertEqual(GazeDatasetSchema5.manifestColumns.last, "crop_clipped_fraction_r")
+        XCTAssertTrue(GazeDatasetSchema5.manifestColumns.contains("crop_side_px_l"))
+        XCTAssertTrue(GazeDatasetSchema5.manifestColumns.contains("crop_side_px_r"))
+        XCTAssertFalse(GazeDatasetSchema5.manifestColumns.contains("crop_side_px"))
     }
 
     func testPlanCoversEveryGridPointAndLensForEveryPose() {
@@ -164,16 +167,17 @@ final class GazeDatasetCanonicalAlignmentTests: XCTestCase {
     }
 
     func testSerializedCropContractUsesTheCanonicalGeometryConstants() {
-        let contract = GazeDatasetCropContract.canonicalPairedEyesV1
+        let contract = GazeDatasetCropContract.canonicalPairedEyesV2
 
+        XCTAssertEqual(contract.version, 2)
         XCTAssertEqual(contract.scale,
-                       "\(GazeDatasetCanonicalAlignment.cropScale)x-maximum-eye-axis-length-pixels")
+                       "\(GazeDatasetCanonicalAlignment.cropScale)x-own-eye-axis-length-pixels")
         XCTAssertEqual(contract.outputWidth, GazeDatasetCanonicalAlignment.outputWidth)
         XCTAssertEqual(contract.outputHeight, GazeDatasetCanonicalAlignment.outputHeight)
         XCTAssertEqual(contract.sampling, "core-image-affine-hq-downsample-edge-clamp")
     }
 
-    func testSchemaFourFreezesTheVisionHeadPitchConvention() {
+    func testSchemaFiveFreezesTheVisionHeadPitchConvention() {
         let contract = GazeDatasetHeadPoseContract.visionRevision3DegreesV1
 
         XCTAssertEqual(contract.source,
@@ -190,7 +194,9 @@ final class GazeDatasetCanonicalAlignmentTests: XCTestCase {
 
         XCTAssertEqual(alignment.rotationRadians * 180 / .pi, 12, accuracy: 1e-9)
         XCTAssertEqual(alignment.disagreementDegrees, 4, accuracy: 1e-9)
-        XCTAssertEqual(alignment.cropSidePixels, 90, accuracy: 1e-9)
+        // one shared rotation, but each eye scaled by its own axis: 1.8 x 40 and 1.8 x 50
+        XCTAssertEqual(alignment.left.cropSidePixels, 72, accuracy: 1e-9)
+        XCTAssertEqual(alignment.right.cropSidePixels, 90, accuracy: 1e-9)
         XCTAssertEqual(alignment.left.centerX, 480, accuracy: 1e-9)
         XCTAssertEqual(alignment.right.centerY, 302, accuracy: 1e-9)
         XCTAssertEqual(alignment.left.clippedFraction, 0, accuracy: 1e-12)
@@ -203,9 +209,27 @@ final class GazeDatasetCanonicalAlignmentTests: XCTestCase {
             right: eye(centerX: 800, centerY: 300, length: 20, angleDegrees: 0),
             imageWidth: 1280, imageHeight: 720))
 
-        XCTAssertEqual(alignment.cropSidePixels, 36, accuracy: 1e-9)
+        XCTAssertEqual(alignment.left.cropSidePixels, 36, accuracy: 1e-9)
+        XCTAssertEqual(alignment.right.cropSidePixels, 36, accuracy: 1e-9)
         XCTAssertEqual(alignment.left.clippedFraction, 13.0 / 36.0, accuracy: 1e-9)
         XCTAssertEqual(alignment.right.clippedFraction, 0, accuracy: 1e-12)
+    }
+
+    /// v1 scaled both crops by the longer axis, so a foreshortened far eye was rendered smaller in
+    /// proportion to head yaw. Each eye now carries its own side, so its own axis always covers
+    /// the same fraction of its own crop.
+    func testEachEyeIsScaledByItsOwnAxisRatherThanTheLongerOfThePair() throws {
+        let alignment = try XCTUnwrap(GazeDatasetCanonicalAlignment(
+            left: eye(centerX: 400, centerY: 300, length: 50, angleDegrees: 0),
+            right: eye(centerX: 900, centerY: 300, length: 25, angleDegrees: 0),
+            imageWidth: 1280, imageHeight: 720))
+
+        XCTAssertEqual(alignment.left.cropSidePixels, 90, accuracy: 1e-9)
+        XCTAssertEqual(alignment.right.cropSidePixels, 45, accuracy: 1e-9)
+        XCTAssertEqual(50 / alignment.left.cropSidePixels,
+                       25 / alignment.right.cropSidePixels, accuracy: 1e-12)
+        XCTAssertEqual(25 / alignment.right.cropSidePixels,
+                       1 / GazeDatasetCanonicalAlignment.cropScale, accuracy: 1e-12)
     }
 
     func testRotatedAndFullyOutsideCropsHaveExactClippingFractions() throws {

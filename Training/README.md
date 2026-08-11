@@ -51,12 +51,19 @@ target. The recomputed alignment evidence cannot catch this: the arithmetic is e
 is in the contract's definition.
 
 `canonical-paired-eye-v2` therefore changes one declared factor — the crop side becomes `1.8 ×`
-that eye's own axis length, making rendered scale invariant by construction and `crop_side_px`
-per-eye. It drops the relative-eye-size cue, which head pose already supplies numerically. Source
-frames are not retained, so the recorded v1 session cannot be re-rendered and is superseded rather
-than repairable; the contract must be settled before further collection, not after. Roll
-normalization stays unvalidated under either version, because that session holds head roll to
-`1.68°` sd and the rotation it exercises is near-identity.
+that eye's own axis length, making rendered scale invariant by construction. It drops the
+relative-eye-size cue, which head pose already supplies numerically. `crop_side_px` becomes the
+per-eye pair `crop_side_px_l` and `crop_side_px_r`, so the manifest column set changes and the
+collector now records **schema 5** with 42 columns. Schema 4 stays loadable under v1, so the
+recorded session remains readable immutable evidence, and the single-input-contract guard keeps
+v1 and v2 rows out of one run. Source frames are not retained, so that session cannot be
+re-rendered and is superseded rather than repairable. Roll normalization stays unvalidated under
+either version, because that session holds head roll to `1.68°` sd and the rotation it exercises
+is near-identity.
+
+Reports from schema-5 sessions add a `crop_side_ratio` diagnostic — the per-sample ratio of the
+shorter to the longer crop side. It is identically `1.0` for v1 by construction; under v2 it
+measures the yaw foreshortening that v1 used to absorb into the far eye's rendered scale.
 
 Session metadata binds source dimensions, crop sampling, the physical-lens angular labels and the
 Apple Vision revision-3 head-pose convention. Per-sample evidence includes contour and pupil counts

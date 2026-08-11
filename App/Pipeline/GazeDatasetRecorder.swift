@@ -58,7 +58,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
             case .invalidEyeEvidence:
                 return "the eye alignment evidence is unavailable for the sample"
             case .invalidManifestContract:
-                return "the schema 4 manifest fields do not match the declared contract"
+                return "the schema 5 manifest fields do not match the declared contract"
             }
         }
     }
@@ -129,7 +129,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
     private static let imageWidth = GazeDatasetCanonicalAlignment.outputWidth
     private static let imageHeight = GazeDatasetCanonicalAlignment.outputHeight
     private static let manifestHeader =
-        GazeDatasetSchema4.manifestColumns.joined(separator: ",") + "\n"
+        GazeDatasetSchema5.manifestColumns.joined(separator: ",") + "\n"
 
     private let state = OSAllocatedUnfairLock(initialState: State())
     private let context = CIContext(options: [.cacheIntermediates: false])
@@ -363,16 +363,16 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         let rightName = "\(stem)-right.png"
         try writeEye(frame.pixelBuffer, crop: reservation.alignment.left,
                      rotation: reservation.alignment.rotationRadians,
-                     side: reservation.alignment.cropSidePixels,
+                     side: reservation.alignment.left.cropSidePixels,
                      to: reservation.directory.appendingPathComponent(leftName))
         try writeEye(frame.pixelBuffer, crop: reservation.alignment.right,
                      rotation: reservation.alignment.rotationRadians,
-                     side: reservation.alignment.cropSidePixels,
+                     side: reservation.alignment.right.cropSidePixels,
                      to: reservation.directory.appendingPathComponent(rightName))
 
         let degrees = 180.0 / Double.pi
         let fields = [
-            "schema_version": "\(GazeDatasetSchema4.version)",
+            "schema_version": "\(GazeDatasetSchema5.version)",
             "participant_id": csv(reservation.participantID),
             "session_id": csv(reservation.sessionID),
             "split": reservation.split.rawValue,
@@ -410,7 +410,8 @@ final class GazeDatasetRecorder: @unchecked Sendable {
             "axis_end_y_r": fmt(rightEnd.y),
             "alignment_rotation_deg": fmt(reservation.alignment.rotationRadians * degrees),
             "alignment_disagreement_deg": fmt(reservation.alignment.disagreementDegrees),
-            "crop_side_px": fmt(reservation.alignment.cropSidePixels),
+            "crop_side_px_l": fmt(reservation.alignment.left.cropSidePixels),
+            "crop_side_px_r": fmt(reservation.alignment.right.cropSidePixels),
             "crop_clipped_fraction_l": fmt(reservation.alignment.left.clippedFraction),
             "crop_clipped_fraction_r": fmt(reservation.alignment.right.clippedFraction),
         ]
@@ -423,10 +424,10 @@ final class GazeDatasetRecorder: @unchecked Sendable {
     }
 
     static func manifestRow(_ fields: [String: String]) throws -> String {
-        guard fields.count == GazeDatasetSchema4.manifestColumns.count else {
+        guard fields.count == GazeDatasetSchema5.manifestColumns.count else {
             throw WriteError.invalidManifestContract
         }
-        return try GazeDatasetSchema4.manifestColumns.map { column in
+        return try GazeDatasetSchema5.manifestColumns.map { column in
             guard let value = fields[column] else { throw WriteError.invalidManifestContract }
             return value
         }.joined(separator: ",") + "\n"
@@ -481,7 +482,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         case .cancelled: status = "cancelled"
         case .failed: status = "failed"
         }
-        let metadata = Metadata(schemaVersion: GazeDatasetSchema4.version,
+        let metadata = Metadata(schemaVersion: GazeDatasetSchema5.version,
                                 participantID: session.participantID,
                                 sessionID: session.id, split: session.split,
                                 createdAt: session.createdAt, completedAt: completedAt,
@@ -493,7 +494,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
                                 cameraFormat: session.cameraFormat,
                                 sourceImageWidth: session.sourceImageWidth,
                                 sourceImageHeight: session.sourceImageHeight,
-                                cropContract: .canonicalPairedEyesV1,
+                                cropContract: .canonicalPairedEyesV2,
                                 labelContract: .lensAngularV1,
                                 headPoseContract: .visionRevision3DegreesV1)
         let encoder = JSONEncoder()

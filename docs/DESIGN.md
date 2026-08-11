@@ -367,10 +367,13 @@ The replacement contract is `canonical-paired-eye-v2`, differing from v1 in one 
 the crop side becomes `1.8 ×` that eye's own axis length rather than `1.8 ×` the maximum of the
 two, making rendered scale invariant by construction. This discards the relative-eye-size cue,
 which is acceptable because head yaw already reaches the model as a numeric feature and does not
-need to re-enter through crop zoom. `crop_side_px` becomes per-eye, so v2 is a schema change and
-not a code fix. Source frames are not retained, so the one recorded schema-4 session cannot be
-re-rendered under v2; it is superseded rather than repairable, which is why the contract must be
-settled before any further collection rather than after.
+need to re-enter through crop zoom. `crop_side_px` becomes the per-eye pair `crop_side_px_l` and
+`crop_side_px_r`, so the manifest column set changes and the collector now records **schema 5**.
+Schema 4 remains loadable under v1 so the recorded session stays readable immutable evidence, and
+the trainer's existing single-input-contract guard keeps v1 and v2 data out of the same run.
+Source frames are not retained, so the recorded schema-4 session cannot be re-rendered under v2;
+it is superseded rather than repairable, which is why the contract had to be settled before any
+further collection rather than after.
 
 Two collection-plan questions remain open under v2. Roll normalization is still unvalidated: the
 recorded session holds head roll to 1.68° sd over an 11.4° range, so the canonical rotation it

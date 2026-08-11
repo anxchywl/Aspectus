@@ -4,7 +4,7 @@ import CoreVideo
 import ImageIO
 import AspectusKit
 
-/// exercises the production recorder's Core Image sampling and schema-4 serialization with
+/// exercises the production recorder's Core Image sampling and schema-5 serialization with
 /// deterministic synthetic frames; no camera, no biometric data, no real storage locations
 final class GazeDatasetRecorderTests: XCTestCase {
     private struct DecodeError: Error {}
@@ -159,11 +159,11 @@ final class GazeDatasetRecorderTests: XCTestCase {
                        imageWidth: 320, imageHeight: 240),
             width: width, height: height)
         XCTAssertEqual(value.rotationRadians, angle, accuracy: 1e-12)
-        XCTAssertEqual(value.cropSidePixels, 60, accuracy: 1e-9)
+        XCTAssertEqual(value.left.cropSidePixels, 60, accuracy: 1e-9)
 
         let aligned = try renderedCrop(buffer, crop: value.left,
                                        rotation: value.rotationRadians,
-                                       side: value.cropSidePixels)
+                                       side: value.left.cropSidePixels)
         for column in stride(from: 6, through: 53, by: 4) {
             XCTAssertEqual(lineRowCentre(aligned, column: column), 29.5, accuracy: 1.5,
                            "column \(column) is not on the horizontal centre line")
@@ -171,47 +171,52 @@ final class GazeDatasetRecorderTests: XCTestCase {
 
         // control: without the alignment rotation the same line must stay visibly slanted
         let unaligned = try renderedCrop(buffer, crop: value.left,
-                                         rotation: 0, side: value.cropSidePixels)
+                                         rotation: 0, side: value.left.cropSidePixels)
         let slope = lineRowCentre(unaligned, column: 50) - lineRowCentre(unaligned, column: 10)
         XCTAssertGreaterThan(abs(slope), 5)
     }
 
-    func testBothEyesUseTheSameRotationAndScale() throws {
+    func testBothEyesShareOneRotationButAreScaledByTheirOwnAxis() throws {
         let width = 320, height = 240
         let sharedAngle = 12.0 * .pi / 180
-        let centres = [(120.0, 130.0), (220.0, 130.0)]
+        // the right eye is foreshortened to half the left eye's axis, as head yaw does. each
+        // drawn segment matches its own declared axis, so this is a physically consistent pair.
+        let eyes = [(cx: 120.0, cy: 130.0, half: 20.0), (cx: 220.0, cy: 130.0, half: 10.0)]
         let buffer = makeBuffer(width: width, height: height) { x, y in
-            for (cx, cy) in centres {
-                let along = cos(sharedAngle) * (Double(x) - cx) + sin(sharedAngle) * (Double(y) - cy)
-                let across = -sin(sharedAngle) * (Double(x) - cx) + cos(sharedAngle) * (Double(y) - cy)
-                if abs(along) <= 27, abs(across) <= 1.5 { return (230, 230, 230) }
+            for value in eyes {
+                let along = cos(sharedAngle) * (Double(x) - value.cx)
+                    + sin(sharedAngle) * (Double(y) - value.cy)
+                let across = -sin(sharedAngle) * (Double(x) - value.cx)
+                    + cos(sharedAngle) * (Double(y) - value.cy)
+                if abs(along) <= value.half, abs(across) <= 1.5 { return (230, 230, 230) }
             }
             return (30, 30, 30)
         }
-        // different per-eye axis angles and lengths still resolve to one rotation and one scale
         let value = try alignment(
-            left: eye(centerX: 120, centerY: 130, lengthPixels: 60.0 / 1.8, angleDegrees: 10,
+            left: eye(centerX: 120, centerY: 130, lengthPixels: 40, angleDegrees: 10,
                       imageWidth: 320, imageHeight: 240),
-            right: eye(centerX: 220, centerY: 130, lengthPixels: 50, angleDegrees: 14,
+            right: eye(centerX: 220, centerY: 130, lengthPixels: 20, angleDegrees: 14,
                        imageWidth: 320, imageHeight: 240),
             width: width, height: height)
         XCTAssertEqual(value.rotationRadians, sharedAngle, accuracy: 1e-9)
-        XCTAssertEqual(value.cropSidePixels, 90, accuracy: 1e-9)
+        XCTAssertEqual(value.left.cropSidePixels, 72, accuracy: 1e-9)
+        XCTAssertEqual(value.right.cropSidePixels, 36, accuracy: 1e-9)
 
         for crop in [value.left, value.right] {
             let raster = try renderedCrop(buffer, crop: crop,
                                           rotation: value.rotationRadians,
-                                          side: value.cropSidePixels)
-            // the shared rotation keeps the 54 px segment horizontal in both crops
-            for column in stride(from: 15, through: 45, by: 5) {
+                                          side: crop.cropSidePixels)
+            // the shared rotation keeps both segments horizontal
+            for column in stride(from: 20, through: 40, by: 5) {
                 XCTAssertEqual(lineRowCentre(raster, column: column), 29.5, accuracy: 1.5)
             }
-            // the shared scale of 60/90 maps the segment ends to columns 30 ± 18
+            // despite 2x different source lengths, each eye's own axis spans 60/1.8 px of its own
+            // crop, so both segments end at columns 30 ± 16.7
             XCTAssertGreaterThan(raster.channel(30, 29, 0), 150)
-            XCTAssertGreaterThan(raster.channel(14, 29, 0) + raster.channel(14, 30, 0), 150)
-            XCTAssertGreaterThan(raster.channel(46, 29, 0) + raster.channel(46, 30, 0), 150)
-            XCTAssertLessThan(raster.channel(7, 29, 0), 80)
-            XCTAssertLessThan(raster.channel(53, 29, 0), 80)
+            XCTAssertGreaterThan(raster.channel(16, 29, 0) + raster.channel(16, 30, 0), 150)
+            XCTAssertGreaterThan(raster.channel(44, 29, 0) + raster.channel(44, 30, 0), 150)
+            XCTAssertLessThan(raster.channel(10, 29, 0), 80)
+            XCTAssertLessThan(raster.channel(50, 29, 0), 80)
         }
     }
 
@@ -226,10 +231,10 @@ final class GazeDatasetRecorderTests: XCTestCase {
             right: eye(centerX: 40, centerY: 60, lengthPixels: 60.0 / 1.8, angleDegrees: 0,
                        imageWidth: 150, imageHeight: 120),
             width: width, height: height)
-        XCTAssertEqual(value.cropSidePixels, 60, accuracy: 1e-9)
+        XCTAssertEqual(value.left.cropSidePixels, 60, accuracy: 1e-9)
 
         let raster = try renderedCrop(buffer, crop: value.left, rotation: 0,
-                                      side: value.cropSidePixels)
+                                      side: value.left.cropSidePixels)
         XCTAssertEqual(raster.width, 60)
         XCTAssertEqual(raster.height, 60)
         // with unit scale, output pixel (i, j) reads source pixel (centerX - 30 + i, centerY - 30 + j)
@@ -265,7 +270,7 @@ final class GazeDatasetRecorderTests: XCTestCase {
                            imageWidth: 150, imageHeight: 120),
                 width: width, height: height)
             let raster = try renderedCrop(buffer, crop: value.left, rotation: 0,
-                                          side: value.cropSidePixels)
+                                          side: value.left.cropSidePixels)
             XCTAssertEqual(raster.width, 60)
             XCTAssertEqual(raster.height, 60)
             for (x, y) in test.region {
@@ -283,9 +288,9 @@ final class GazeDatasetRecorderTests: XCTestCase {
                        imageWidth: 150, imageHeight: 120),
             width: width, height: height)
         let first = try renderedCrop(buffer, crop: value.left, rotation: 0,
-                                     side: value.cropSidePixels)
+                                     side: value.left.cropSidePixels)
         let second = try renderedCrop(buffer, crop: value.left, rotation: 0,
-                                      side: value.cropSidePixels)
+                                      side: value.left.cropSidePixels)
         XCTAssertEqual(first.bytes, second.bytes)
     }
 
@@ -300,11 +305,11 @@ final class GazeDatasetRecorderTests: XCTestCase {
             right: eye(centerX: 201.9, centerY: 103.4, lengthPixels: 120.0 / 1.8,
                        angleDegrees: 9.1, imageWidth: 320, imageHeight: 240),
             width: width, height: height)
-        XCTAssertEqual(value.cropSidePixels, 137.3, accuracy: 1e-9)
+        XCTAssertEqual(value.left.cropSidePixels, 137.3, accuracy: 1e-9)
 
         let raster = try renderedCrop(buffer, crop: value.left,
                                       rotation: value.rotationRadians,
-                                      side: value.cropSidePixels)
+                                      side: value.left.cropSidePixels)
         XCTAssertEqual(raster.width, 60)
         XCTAssertEqual(raster.height, 60)
         XCTAssertEqual(raster.colorSpaceName, CGColorSpace.sRGB as String?)
@@ -315,11 +320,11 @@ final class GazeDatasetRecorderTests: XCTestCase {
         }
     }
 
-    // MARK: - schema-4 serialization
+    // MARK: - schema-5 serialization
 
     func testManifestRowRejectsSurplusMissingAndMisnamedFields() throws {
         var fields = Dictionary(uniqueKeysWithValues:
-            GazeDatasetSchema4.manifestColumns.shuffled().enumerated().map {
+            GazeDatasetSchema5.manifestColumns.shuffled().enumerated().map {
                 ($0.element, "value-\($0.offset)")
             })
         let row = try GazeDatasetRecorder.manifestRow(fields)
@@ -327,10 +332,10 @@ final class GazeDatasetRecorderTests: XCTestCase {
         XCTAssertTrue(row.hasSuffix("\n"))
         XCTAssertEqual(row.trimmingCharacters(in: .newlines)
                            .split(separator: ",").map(String.init),
-                       GazeDatasetSchema4.manifestColumns.map { fields[$0]! })
+                       GazeDatasetSchema5.manifestColumns.map { fields[$0]! })
 
         var missing = fields
-        missing.removeValue(forKey: "crop_side_px")
+        missing.removeValue(forKey: "crop_side_px_l")
         XCTAssertThrowsError(try GazeDatasetRecorder.manifestRow(missing))
 
         var surplus = fields
@@ -338,11 +343,11 @@ final class GazeDatasetRecorderTests: XCTestCase {
         XCTAssertThrowsError(try GazeDatasetRecorder.manifestRow(surplus))
 
         var misnamed = fields
-        misnamed.removeValue(forKey: "crop_side_px")
+        misnamed.removeValue(forKey: "crop_side_px_l")
         misnamed["crop_side_pixels"] = "90"
         XCTAssertThrowsError(try GazeDatasetRecorder.manifestRow(misnamed))
 
-        fields["schema_version"] = "4"
+        fields["schema_version"] = "5"
         XCTAssertNoThrow(try GazeDatasetRecorder.manifestRow(fields))
     }
 
@@ -376,7 +381,7 @@ final class GazeDatasetRecorderTests: XCTestCase {
                      pixelBuffer: buffer)
     }
 
-    func testProductionSessionEmitsTheExactSchemaFourContracts() throws {
+    func testProductionSessionEmitsTheExactSchemaFiveContracts() throws {
         let width = 320, height = 240
         let buffer = makeBuffer(width: width, height: height) { x, y in
             (UInt8((60 + x) % 256), UInt8((60 + y) % 256), 77)
@@ -410,27 +415,27 @@ final class GazeDatasetRecorderTests: XCTestCase {
                 as? String == "cancelled"
         }, "terminal session metadata was never written")
 
-        // header: exactly the frozen 41 unique columns in order
+        // header: exactly the frozen 42 unique columns in order
         let lines = try String(contentsOf: manifestURL, encoding: .utf8)
             .split(separator: "\n").map(String.init)
         XCTAssertEqual(lines.count, 3)
         let header = lines[0].split(separator: ",").map(String.init)
-        XCTAssertEqual(header, GazeDatasetSchema4.manifestColumns)
-        XCTAssertEqual(header.count, 41)
-        XCTAssertEqual(Set(header).count, 41)
+        XCTAssertEqual(header, GazeDatasetSchema5.manifestColumns)
+        XCTAssertEqual(header.count, 42)
+        XCTAssertEqual(Set(header).count, 42)
 
         let rows = [lines[1], lines[2]].map {
             $0.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
         }
-        XCTAssertEqual(rows[0].count, 41)
-        XCTAssertEqual(rows[1].count, 41)
+        XCTAssertEqual(rows[0].count, 42)
+        XCTAssertEqual(rows[1].count, 42)
         func value(_ column: String, _ row: [String]) -> String {
             row[header.firstIndex(of: column)!]
         }
 
         let degrees = 180.0 / Double.pi
         let expected: [String: String] = [
-            "schema_version": "4",
+            "schema_version": "5",
             "session_id": "\"\(sessionID)\"",
             "split": "training",
             "sample": "1",
@@ -467,7 +472,10 @@ final class GazeDatasetRecorderTests: XCTestCase {
             "axis_end_y_r": "0.500000000000",
             "alignment_rotation_deg": "0.000000000000",
             "alignment_disagreement_deg": "0.000000000000",
-            "crop_side_px": "90.000000000000",
+            // the left axis spans 0.125 x 320 px and the right 0.15625 x 320 px, so each eye
+            // serializes 1.8 x its own length rather than one shared 90 px side
+            "crop_side_px_l": "72.000000000000",
+            "crop_side_px_r": "90.000000000000",
             "crop_clipped_fraction_l": "0.000000000000",
             "crop_clipped_fraction_r": "0.000000000000",
         ]
@@ -480,12 +488,12 @@ final class GazeDatasetRecorderTests: XCTestCase {
 
         // every fractional column is POSIX fixed-point with exactly 12 decimals
         let fractional = header.filter {
-            $0.hasSuffix("_deg") || $0.hasSuffix("_s") || $0.hasSuffix("_px")
+            $0.hasSuffix("_deg") || $0.hasSuffix("_s") || $0.hasPrefix("crop_side_px")
                 || $0.hasPrefix("axis_") || $0.hasPrefix("crop_clipped")
                 || $0.hasPrefix("open_") || $0 == "face_conf"
                 || $0 == "target_x" || $0 == "target_y"
         }
-        XCTAssertEqual(fractional.count, 24)
+        XCTAssertEqual(fractional.count, 25)
         for row in rows {
             for column in fractional {
                 XCTAssertNotNil(value(column, row).wholeMatch(of: /-?\d+\.\d{12}/),
@@ -496,19 +504,19 @@ final class GazeDatasetRecorderTests: XCTestCase {
         // session metadata binds the exact crop, label, pose and source-dimension contracts
         let metadata = try XCTUnwrap(JSONSerialization.jsonObject(
             with: Data(contentsOf: sessionURL)) as? [String: Any])
-        XCTAssertEqual(metadata["schemaVersion"] as? Int, 4)
+        XCTAssertEqual(metadata["schemaVersion"] as? Int, 5)
         XCTAssertEqual(metadata["sourceImageWidth"] as? Int, width)
         XCTAssertEqual(metadata["sourceImageHeight"] as? Int, height)
         XCTAssertEqual(metadata["eyeImageWidth"] as? Int, 60)
         XCTAssertEqual(metadata["eyeImageHeight"] as? Int, 60)
         XCTAssertEqual(metadata["cameraFormat"] as? String, "synthetic 320x240")
         XCTAssertEqual(metadata["cropContract"] as? NSDictionary, [
-            "version": 1,
+            "version": 2,
             "coordinateSpace": "source-image-fraction-top-left",
             "axisExtractor": "farthest-contour-pair-ordered-image-x",
             "alignment": "circular-mean-paired-eye-axes",
             "center": "per-eye-axis-midpoint",
-            "scale": "1.8x-maximum-eye-axis-length-pixels",
+            "scale": "1.8x-own-eye-axis-length-pixels",
             "outputWidth": 60,
             "outputHeight": 60,
             "sampling": "core-image-affine-hq-downsample-edge-clamp",
@@ -539,17 +547,18 @@ final class GazeDatasetRecorderTests: XCTestCase {
             XCTAssertEqual(permissions, 0o600, "\(name) is not owner-only")
         }
 
-        // the written eye crops equal a direct render with the one shared rotation and scale,
-        // so the production write path used the same alignment for both eyes
+        // the written eye crops equal a direct render with the one shared rotation and each eye's
+        // own scale, so the production write path used the same alignment for both eyes
         let shared = try alignment(left: tracking.leftEye, right: tracking.rightEye,
                                    width: width, height: height)
-        XCTAssertEqual(shared.cropSidePixels, 90, accuracy: 1e-9)
+        XCTAssertEqual(shared.left.cropSidePixels, 72, accuracy: 1e-9)
+        XCTAssertEqual(shared.right.cropSidePixels, 90, accuracy: 1e-9)
         let expectedLeft = try renderedCrop(buffer, crop: shared.left,
                                             rotation: shared.rotationRadians,
-                                            side: shared.cropSidePixels)
+                                            side: shared.left.cropSidePixels)
         let expectedRight = try renderedCrop(buffer, crop: shared.right,
                                              rotation: shared.rotationRadians,
-                                             side: shared.cropSidePixels)
+                                             side: shared.right.cropSidePixels)
         let writtenLeft = try decodePNG(directoryURL.appendingPathComponent("sample-00001-left.png"))
         let writtenRight = try decodePNG(directoryURL.appendingPathComponent("sample-00001-right.png"))
         XCTAssertEqual(writtenLeft.bytes, expectedLeft.bytes)

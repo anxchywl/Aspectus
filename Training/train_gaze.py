@@ -20,7 +20,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -65,19 +65,33 @@ PRETRAINED_ARCHITECTURE = "openvino-gaze-estimation-adas-0002-personalized-symme
 NATIVE_ARCHITECTURE = "shared-eye-spatial-cnn-head-pose-v2"
 NATIVE_PARAMETER_COUNT = 156_226
 LEGACY_INPUT_CONTRACT = "legacy-axis-aligned-eye-crops-v1"
-CANONICAL_INPUT_CONTRACT = "canonical-paired-eye-v1"
-CANONICAL_CROP_CONTRACT = {
-    "version": 1,
-    "coordinateSpace": "source-image-fraction-top-left",
-    "axisExtractor": "farthest-contour-pair-ordered-image-x",
-    "alignment": "circular-mean-paired-eye-axes",
-    "center": "per-eye-axis-midpoint",
-    "scale": "1.8x-maximum-eye-axis-length-pixels",
-    "outputWidth": IMAGE_SIZE,
-    "outputHeight": IMAGE_SIZE,
-    "sampling": "core-image-affine-hq-downsample-edge-clamp",
-    "colorSpace": "sRGB",
-}
+CANONICAL_INPUT_CONTRACT_V1 = "canonical-paired-eye-v1"
+CANONICAL_INPUT_CONTRACT_V2 = "canonical-paired-eye-v2"
+
+
+def _canonical_crop_contract(version: int, scale: str) -> dict[str, object]:
+    return {
+        "version": version,
+        "coordinateSpace": "source-image-fraction-top-left",
+        "axisExtractor": "farthest-contour-pair-ordered-image-x",
+        "alignment": "circular-mean-paired-eye-axes",
+        "center": "per-eye-axis-midpoint",
+        "scale": scale,
+        "outputWidth": IMAGE_SIZE,
+        "outputHeight": IMAGE_SIZE,
+        "sampling": "core-image-affine-hq-downsample-edge-clamp",
+        "colorSpace": "sRGB",
+    }
+
+
+# v1 scales both crops by the longer of the two axes, so head yaw foreshortens the far eye into a
+# smaller rendering. v2 scales each eye by its own axis, making rendered scale yaw-invariant.
+CANONICAL_CROP_CONTRACT_V1 = _canonical_crop_contract(
+    1, "1.8x-maximum-eye-axis-length-pixels"
+)
+CANONICAL_CROP_CONTRACT_V2 = _canonical_crop_contract(
+    2, "1.8x-own-eye-axis-length-pixels"
+)
 CANONICAL_LABEL_CONTRACT = {
     "version": 1,
     "units": "degrees",
@@ -109,28 +123,52 @@ INPUT_PREPROCESSING_CONTRACTS = {
         "head_pose_tensor_encoding": "raw-degrees",
         "head_pose_source_contract": "historical-unversioned",
     },
-    CANONICAL_INPUT_CONTRACT: {
-        "contract": CANONICAL_INPUT_CONTRACT,
+    CANONICAL_INPUT_CONTRACT_V1: {
+        "contract": CANONICAL_INPUT_CONTRACT_V1,
         "image_width": IMAGE_SIZE,
         "image_height": IMAGE_SIZE,
         "color_space": "sRGB",
         "pixel_normalization": "rgb-zero-to-one",
         "image_resize": "none",
         "alignment": "recorder-canonical-paired-eye-v1",
-        "recorder_crop_contract": CANONICAL_CROP_CONTRACT,
+        "recorder_crop_contract": CANONICAL_CROP_CONTRACT_V1,
+        "head_pose_units": "degrees",
+        "head_pose_order": "yaw-pitch-roll",
+        "head_pose_tensor_encoding": "raw-degrees",
+        "head_pose_source_contract": CANONICAL_HEAD_POSE_CONTRACT,
+    },
+    CANONICAL_INPUT_CONTRACT_V2: {
+        "contract": CANONICAL_INPUT_CONTRACT_V2,
+        "image_width": IMAGE_SIZE,
+        "image_height": IMAGE_SIZE,
+        "color_space": "sRGB",
+        "pixel_normalization": "rgb-zero-to-one",
+        "image_resize": "none",
+        "alignment": "recorder-canonical-paired-eye-v2",
+        "recorder_crop_contract": CANONICAL_CROP_CONTRACT_V2,
         "head_pose_units": "degrees",
         "head_pose_order": "yaw-pitch-roll",
         "head_pose_tensor_encoding": "raw-degrees",
         "head_pose_source_contract": CANONICAL_HEAD_POSE_CONTRACT,
     },
 }
-SCHEMA_FOUR_CROP_SCALE = 1.8
-SCHEMA_FOUR_SERIALIZATION_RESOLUTION = 1e-12
-SCHEMA_FOUR_DERIVED_ANGLE_TOLERANCE_DEGREES = 1e-6
-SCHEMA_FOUR_DERIVED_CLIPPING_TOLERANCE = 1e-8
-SCHEMA_FOUR_ALLOWED_PUPIL_SOURCES = frozenset({
+# schema 4 froze crop contract v1; schema 5 is the same collection plan under v2
+CANONICAL_SCHEMA_CROP_VERSIONS = {4: 1, 5: 2}
+CANONICAL_SCHEMA_CONTRACTS = {
+    4: (CANONICAL_CROP_CONTRACT_V1, CANONICAL_INPUT_CONTRACT_V1),
+    5: (CANONICAL_CROP_CONTRACT_V2, CANONICAL_INPUT_CONTRACT_V2),
+}
+CANONICAL_CROP_SCALE = 1.8
+CANONICAL_SERIALIZATION_RESOLUTION = 1e-12
+CANONICAL_DERIVED_ANGLE_TOLERANCE_DEGREES = 1e-6
+CANONICAL_DERIVED_CLIPPING_TOLERANCE = 1e-8
+CANONICAL_ALLOWED_PUPIL_SOURCES = frozenset({
     "visionLandmark", "contourCentroid", "none",
 })
+
+
+def canonical_schema(version: int) -> bool:
+    return version in CANONICAL_SCHEMA_CROP_VERSIONS
 POSE_PROMPTS = ("neutral", "turnLeft", "turnRight", "lookUp", "lookDown")
 TARGETS_PER_POSE = 27
 GRID_FRACTIONS = (0.10, 0.30, 0.50, 0.70, 0.90)
@@ -206,7 +244,7 @@ REQUIRED_COLUMNS = {
     "left_image",
     "right_image",
 }
-SCHEMA_FOUR_COLUMNS = {
+CANONICAL_COLUMNS = {
     "frame_id",
     "elapsed_s",
     "contour_points_l",
@@ -225,10 +263,19 @@ SCHEMA_FOUR_COLUMNS = {
     "axis_end_y_r",
     "alignment_rotation_deg",
     "alignment_disagreement_deg",
-    "crop_side_px",
     "crop_clipped_fraction_l",
     "crop_clipped_fraction_r",
 }
+# v1 serialized one shared side; v2 serializes the side actually used for each eye
+CANONICAL_CROP_SIDE_COLUMNS = {
+    1: ("crop_side_px",),
+    2: ("crop_side_px_l", "crop_side_px_r"),
+}
+
+
+def canonical_columns(schema_version: int) -> set[str]:
+    crop_version = CANONICAL_SCHEMA_CROP_VERSIONS[schema_version]
+    return CANONICAL_COLUMNS | set(CANONICAL_CROP_SIDE_COLUMNS[crop_version])
 
 
 @dataclass(frozen=True)
@@ -239,6 +286,8 @@ class EyeQualityEvidence:
     axis_start: tuple[float, float]
     axis_end: tuple[float, float]
     crop_clipped_fraction: float
+    # under crop contract v1 both eyes carry the one shared side; under v2 each carries its own
+    crop_side_pixels: float = math.nan
 
 
 @dataclass(frozen=True)
@@ -248,7 +297,7 @@ class CanonicalAlignmentEvidence:
     right: EyeQualityEvidence
     rotation_degrees: float
     disagreement_degrees: float
-    crop_side_pixels: float
+    crop_contract_version: int = 1
 
 
 @dataclass(frozen=True)
@@ -560,7 +609,8 @@ def validated_input_preprocessing(value: object) -> dict[str, object]:
 def sample_input_contract(sample: Sample) -> str:
     if sample.input_contract:
         return sample.input_contract
-    return CANONICAL_INPUT_CONTRACT if sample.schema_version == 4 else LEGACY_INPUT_CONTRACT
+    return CANONICAL_SCHEMA_CONTRACTS[sample.schema_version][1] \
+        if canonical_schema(sample.schema_version) else LEGACY_INPUT_CONTRACT
 
 
 def sample_label_contract_sha256(sample: Sample) -> str:
@@ -592,7 +642,7 @@ def require_single_label_contract(*sample_groups: Iterable[Sample]) -> str:
     return digest
 
 
-def schema_four_axis(
+def canonical_axis(
     start: tuple[float, float], end: tuple[float, float],
     source_width: int, source_height: int,
 ) -> tuple[tuple[float, float], float, float]:
@@ -602,7 +652,7 @@ def schema_four_axis(
     dy = second[1] - first[1]
     length = math.hypot(dx, dy)
     if length <= 1e-6:
-        raise ValueError("schema-4 eye alignment axis is degenerate")
+        raise ValueError("canonical-schema eye alignment axis is degenerate")
     return (
         ((first[0] + second[0]) / 2, (first[1] + second[1]) / 2),
         length,
@@ -681,16 +731,16 @@ def clipped_crop_fraction(
     return min(1.0, max(0.0, 1 - visible_area / (side * side)))
 
 
-def schema_four_eye_evidence(
+def canonical_eye_evidence(
     row: dict[str, str], suffix: str,
 ) -> EyeQualityEvidence:
     contour_points = finite_integer(row, f"contour_points_{suffix}", minimum=2)
     pupil_source = row[f"pupil_source_{suffix}"]
-    if pupil_source not in SCHEMA_FOUR_ALLOWED_PUPIL_SOURCES:
-        raise ValueError("schema-4 pupil source is invalid")
+    if pupil_source not in CANONICAL_ALLOWED_PUPIL_SOURCES:
+        raise ValueError("canonical-schema pupil source is invalid")
     pupil_points = finite_integer(row, f"pupil_points_{suffix}")
     if (pupil_source == "visionLandmark") != (pupil_points > 0):
-        raise ValueError("schema-4 pupil evidence is inconsistent")
+        raise ValueError("canonical-schema pupil evidence is inconsistent")
     start = (
         finite_float(row, f"axis_start_x_{suffix}"),
         finite_float(row, f"axis_start_y_{suffix}"),
@@ -700,10 +750,10 @@ def schema_four_eye_evidence(
         finite_float(row, f"axis_end_y_{suffix}"),
     )
     if not (start[0] < end[0] or (start[0] == end[0] and start[1] <= end[1])):
-        raise ValueError("schema-4 eye alignment axis ordering is invalid")
+        raise ValueError("canonical-schema eye alignment axis ordering is invalid")
     clipped_fraction = finite_float(row, f"crop_clipped_fraction_{suffix}")
     if not 0 <= clipped_fraction <= 1:
-        raise ValueError("schema-4 crop clipping fraction is invalid")
+        raise ValueError("canonical-schema crop clipping fraction is invalid")
     return EyeQualityEvidence(
         contour_point_count=contour_points,
         pupil_source=pupil_source,
@@ -714,46 +764,56 @@ def schema_four_eye_evidence(
     )
 
 
-def schema_four_alignment_evidence(
+def canonical_alignment_evidence(
     row: dict[str, str], source_width: int, source_height: int,
+    crop_contract_version: int = 1,
 ) -> CanonicalAlignmentEvidence:
-    left = schema_four_eye_evidence(row, "l")
-    right = schema_four_eye_evidence(row, "r")
-    left_center, left_length, left_angle = schema_four_axis(
+    if crop_contract_version not in CANONICAL_CROP_SIDE_COLUMNS:
+        raise ValueError("unsupported canonical crop contract version")
+    left = canonical_eye_evidence(row, "l")
+    right = canonical_eye_evidence(row, "r")
+    left_center, left_length, left_angle = canonical_axis(
         left.axis_start, left.axis_end, source_width, source_height
     )
-    right_center, right_length, right_angle = schema_four_axis(
+    right_center, right_length, right_angle = canonical_axis(
         right.axis_start, right.axis_end, source_width, source_height
     )
     sine = math.sin(left_angle) + math.sin(right_angle)
     cosine = math.cos(left_angle) + math.cos(right_angle)
     if math.hypot(sine, cosine) <= 1e-6:
-        raise ValueError("schema-4 paired-eye alignment axes are inconsistent")
+        raise ValueError("canonical-schema paired-eye alignment axes are inconsistent")
     rotation = math.atan2(sine, cosine)
     disagreement = abs(math.atan2(
         math.sin(left_angle - right_angle), math.cos(left_angle - right_angle)
     ))
-    crop_side = SCHEMA_FOUR_CROP_SCALE * max(left_length, right_length)
+    if crop_contract_version == 1:
+        shared_side = CANONICAL_CROP_SCALE * max(left_length, right_length)
+        expected_left_side = expected_right_side = shared_side
+        actual_left_side = actual_right_side = finite_float(row, "crop_side_px")
+    else:
+        expected_left_side = CANONICAL_CROP_SCALE * left_length
+        expected_right_side = CANONICAL_CROP_SCALE * right_length
+        actual_left_side = finite_float(row, "crop_side_px_l")
+        actual_right_side = finite_float(row, "crop_side_px_r")
     actual_rotation = finite_float(row, "alignment_rotation_deg")
     actual_disagreement = finite_float(row, "alignment_disagreement_deg")
-    actual_crop_side = finite_float(row, "crop_side_px")
     if not -180 <= actual_rotation <= 180 \
             or not 0 <= actual_disagreement <= 180 \
-            or actual_crop_side <= 0:
-        raise ValueError("schema-4 alignment evidence is outside its valid range")
+            or actual_left_side <= 0 or actual_right_side <= 0:
+        raise ValueError("canonical-schema alignment evidence is outside its valid range")
     expected_rotation = math.degrees(rotation)
     expected_disagreement = math.degrees(disagreement)
     source_diagonal = math.hypot(source_width, source_height)
     angle_tolerance = max(
-        SCHEMA_FOUR_DERIVED_ANGLE_TOLERANCE_DEGREES,
+        CANONICAL_DERIVED_ANGLE_TOLERANCE_DEGREES,
         math.degrees(
-            4 * source_diagonal * SCHEMA_FOUR_SERIALIZATION_RESOLUTION
+            4 * source_diagonal * CANONICAL_SERIALIZATION_RESOLUTION
             / min(left_length, right_length)
         ),
     )
     crop_side_tolerance = (
-        4 * SCHEMA_FOUR_CROP_SCALE * source_diagonal
-        * SCHEMA_FOUR_SERIALIZATION_RESOLUTION
+        4 * CANONICAL_CROP_SCALE * source_diagonal
+        * CANONICAL_SERIALIZATION_RESOLUTION
         + 1e-9
     )
     values = (
@@ -763,34 +823,37 @@ def schema_four_alignment_evidence(
             expected_disagreement,
             angle_tolerance,
         ),
-        (actual_crop_side, crop_side, crop_side_tolerance),
+        (actual_left_side, expected_left_side, crop_side_tolerance),
+        (actual_right_side, expected_right_side, crop_side_tolerance),
         (
             left.crop_clipped_fraction,
             clipped_crop_fraction(
-                left_center, rotation, crop_side, source_width, source_height
+                left_center, rotation, actual_left_side, source_width, source_height
             ),
-            SCHEMA_FOUR_DERIVED_CLIPPING_TOLERANCE,
+            CANONICAL_DERIVED_CLIPPING_TOLERANCE,
         ),
         (
             right.crop_clipped_fraction,
             clipped_crop_fraction(
-                right_center, rotation, crop_side, source_width, source_height
+                right_center, rotation, actual_right_side, source_width, source_height
             ),
-            SCHEMA_FOUR_DERIVED_CLIPPING_TOLERANCE,
+            CANONICAL_DERIVED_CLIPPING_TOLERANCE,
         ),
     )
     if not all(
         math.isclose(actual, expected, rel_tol=0, abs_tol=tolerance)
         for actual, expected, tolerance in values
     ):
-        raise ValueError("schema-4 derived alignment evidence does not match its source geometry")
+        raise ValueError(
+            "canonical-schema derived alignment evidence does not match its source geometry"
+        )
     return CanonicalAlignmentEvidence(
         source_image_size=(source_width, source_height),
-        left=left,
-        right=right,
+        left=replace(left, crop_side_pixels=actual_left_side),
+        right=replace(right, crop_side_pixels=actual_right_side),
         rotation_degrees=actual_rotation,
         disagreement_degrees=actual_disagreement,
-        crop_side_pixels=actual_crop_side,
+        crop_contract_version=crop_contract_version,
     )
 
 
@@ -850,7 +913,8 @@ def validated_session_setup(
     }
     input_contract = LEGACY_INPUT_CONTRACT
     source_image_size: tuple[int, int] | None = None
-    if schema_version == 4:
+    if canonical_schema(schema_version):
+        crop_contract, canonical_input_contract = CANONICAL_SCHEMA_CONTRACTS[schema_version]
         source_width = validated_positive_integer(
             metadata.get("sourceImageWidth"), "source image width"
         )
@@ -858,23 +922,23 @@ def validated_session_setup(
             metadata.get("sourceImageHeight"), "source image height"
         )
         if not matches_canonical_contract(
-            metadata.get("cropContract"), CANONICAL_CROP_CONTRACT
+            metadata.get("cropContract"), crop_contract
         ):
-            raise ValueError("session schema-4 crop contract is invalid")
+            raise ValueError("session canonical-schema crop contract is invalid")
         if not matches_canonical_contract(
             metadata.get("labelContract"), CANONICAL_LABEL_CONTRACT
         ):
-            raise ValueError("session schema-4 label contract is invalid")
+            raise ValueError("session canonical-schema label contract is invalid")
         if not matches_canonical_contract(
             metadata.get("headPoseContract"), CANONICAL_HEAD_POSE_CONTRACT
         ):
-            raise ValueError("session schema-4 head-pose contract is invalid")
+            raise ValueError("session canonical-schema head-pose contract is invalid")
         source_image_size = (source_width, source_height)
-        input_contract = CANONICAL_INPUT_CONTRACT
+        input_contract = canonical_input_contract
         setup.update({
             "source_image_width": source_width,
             "source_image_height": source_height,
-            "crop_contract": CANONICAL_CROP_CONTRACT,
+            "crop_contract": crop_contract,
             "label_contract": CANONICAL_LABEL_CONTRACT,
             "head_pose_contract": CANONICAL_HEAD_POSE_CONTRACT,
         })
@@ -957,7 +1021,7 @@ def load_samples(
         session_id = str(metadata["sessionID"])
         stored_split = str(metadata["split"])
         schema_version = int(metadata["schemaVersion"])
-        if schema_version not in {1, 2, 3, 4}:
+        if schema_version not in {1, 2, 3, 4, 5}:
             raise ValueError(f"unsupported gaze dataset schema: {schema_version}")
         (
             geometry,
@@ -977,23 +1041,24 @@ def load_samples(
         with manifest_path.open(newline="") as handle:
             reader = csv.DictReader(handle)
             required_columns = REQUIRED_COLUMNS | (
-                SCHEMA_FOUR_COLUMNS if schema_version == 4 else set()
+                canonical_columns(schema_version)
+                if canonical_schema(schema_version) else set()
             )
             fieldnames = reader.fieldnames or []
             missing = required_columns.difference(fieldnames)
             if missing:
                 raise ValueError(f"{manifest_path} is missing columns: {sorted(missing)}")
-            if schema_version == 4 and (
+            if canonical_schema(schema_version) and (
                 len(fieldnames) != len(required_columns)
                 or set(fieldnames) != required_columns
             ):
-                raise ValueError("schema-4 manifest columns do not match the frozen contract")
+                raise ValueError("canonical-schema manifest columns do not match the frozen contract")
             rows = list(reader)
-            if schema_version == 4 and any(
+            if canonical_schema(schema_version) and any(
                 None in row or any(value is None for value in row.values())
                 for row in rows
             ):
-                raise ValueError("schema-4 manifest rows do not match the frozen contract")
+                raise ValueError("canonical-schema manifest rows do not match the frozen contract")
         session_metadata_sha256 = file_digest(metadata_path)
         manifest_sha256 = file_digest(manifest_path)
         expected = int(metadata["capturedSamples"])
@@ -1032,19 +1097,19 @@ def load_samples(
             face_confidence = finite_float(row, "face_conf")
             left_openness = finite_float(row, "open_l")
             right_openness = finite_float(row, "open_r")
-            if schema_version == 4 and (
+            if canonical_schema(schema_version) and (
                 not 0 <= face_confidence <= 1
                 or not 0 <= left_openness <= 1
                 or not 0 <= right_openness <= 1
             ):
-                raise ValueError("schema-4 tracking quality is outside its valid range")
-            if schema_version == 4:
+                raise ValueError("canonical-schema tracking quality is outside its valid range")
+            if canonical_schema(schema_version):
                 frame_id = finite_integer(row, "frame_id")
                 elapsed = finite_float(row, "elapsed_s")
                 if elapsed < 0:
-                    raise ValueError("schema-4 elapsed time is invalid")
+                    raise ValueError("canonical-schema elapsed time is invalid")
                 if frame_id <= previous_frame_id or elapsed <= previous_elapsed:
-                    raise ValueError("schema-4 frame timing is not strictly increasing")
+                    raise ValueError("canonical-schema frame timing is not strictly increasing")
                 previous_frame_id = frame_id
                 previous_elapsed = elapsed
             head_yaw = finite_float(row, "head_yaw_deg")
@@ -1079,11 +1144,12 @@ def load_samples(
                     and target_id % TARGETS_PER_POSE == 0:
                 continue
             canonical_alignment = None
-            if schema_version == 4:
+            if canonical_schema(schema_version):
                 if source_image_size is None:
-                    raise ValueError("session schema-4 source image size is missing")
-                canonical_alignment = schema_four_alignment_evidence(
-                    row, *source_image_size
+                    raise ValueError("session canonical-schema source image size is missing")
+                canonical_alignment = canonical_alignment_evidence(
+                    row, *source_image_size,
+                    crop_contract_version=CANONICAL_SCHEMA_CROP_VERSIONS[schema_version],
                 )
             if face_confidence < minimum_face_confidence \
                     or left_openness < MINIMUM_OPENNESS \
@@ -1530,7 +1596,7 @@ def grouped_metrics(
 def numeric_evidence_summary(values: Iterable[float]) -> dict[str, float | int]:
     values = list(values)
     if not values or not all(math.isfinite(value) for value in values):
-        raise ValueError("schema-4 diagnostic evidence is invalid")
+        raise ValueError("canonical-schema diagnostic evidence is invalid")
     return {
         "count": len(values),
         "minimum": min(values),
@@ -1539,12 +1605,14 @@ def numeric_evidence_summary(values: Iterable[float]) -> dict[str, float | int]:
     }
 
 
-def schema_four_quality_diagnostics(samples: list[Sample]) -> dict[str, object] | None:
-    if not samples or any(sample.schema_version != 4 for sample in samples):
+def canonical_quality_diagnostics(samples: list[Sample]) -> dict[str, object] | None:
+    if not samples or any(
+        not canonical_schema(sample.schema_version) for sample in samples
+    ):
         return None
     alignments = [sample.canonical_alignment for sample in samples]
     if any(alignment is None for alignment in alignments):
-        raise ValueError("schema-4 diagnostic evidence is missing")
+        raise ValueError("canonical-schema diagnostic evidence is missing")
     values = [alignment for alignment in alignments if alignment is not None]
     pupil_source_pairs: dict[str, int] = {}
     for alignment in values:
@@ -1563,7 +1631,20 @@ def schema_four_quality_diagnostics(samples: list[Sample]) -> dict[str, object] 
             alignment.disagreement_degrees for alignment in values
         ),
         "crop_side_pixels": numeric_evidence_summary(
-            alignment.crop_side_pixels for alignment in values
+            side
+            for alignment in values
+            for side in (
+                alignment.left.crop_side_pixels,
+                alignment.right.crop_side_pixels,
+            )
+        ),
+        # 1.0 for every v1 sample by construction, because v1 shares one side between the eyes.
+        # Under v2 this exposes the yaw foreshortening that the shared side used to absorb into
+        # the far eye's rendered scale.
+        "crop_side_ratio": numeric_evidence_summary(
+            min(alignment.left.crop_side_pixels, alignment.right.crop_side_pixels)
+            / max(alignment.left.crop_side_pixels, alignment.right.crop_side_pixels)
+            for alignment in values
         ),
         "minimum_contour_point_count": numeric_evidence_summary(
             float(min(
@@ -1598,7 +1679,7 @@ def diagnostic_breakdowns(
         predicted, expected, lens_mask = predict_degrees(
             model, loader, device, pretrained
         )
-        schema_four_quality = schema_four_quality_diagnostics(session_samples)
+        canonical_quality = canonical_quality_diagnostics(session_samples)
         result[session_id] = {
             "pose_block": grouped_metrics(
                 session_samples, predicted, expected, lens_mask,
@@ -1643,10 +1724,10 @@ def diagnostic_breakdowns(
                 session_samples, predicted, expected, lens_mask,
                 lambda sample: bucket(sample.minimum_openness, openness_boundaries),
             ),
-            "schema_four_quality": schema_four_quality,
+            "canonical_quality": canonical_quality,
             "unavailable_indicators": (
                 ["occlusion_score"]
-                if schema_four_quality is not None
+                if canonical_quality is not None
                 else ["crop_clipping", "alignment_quality", "occlusion"]
             ),
         }
@@ -2254,9 +2335,9 @@ def sample_set_digest(samples: list[Sample]) -> str:
             "session_metadata_sha256": sample.session_metadata_sha256,
             "manifest_sha256": sample.manifest_sha256,
         }
-        if sample.schema_version == 4:
+        if canonical_schema(sample.schema_version):
             if sample.canonical_alignment is None:
-                raise ValueError("schema-4 sample is missing canonical alignment evidence")
+                raise ValueError("canonical-schema sample is missing canonical alignment evidence")
             record.update({
                 "input_contract": sample_input_contract(sample),
                 "label_contract_sha256": sample_label_contract_sha256(sample),

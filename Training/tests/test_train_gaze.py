@@ -22,10 +22,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import train_gaze
 from train_gaze import (
     CANDIDATE_MANIFEST_FILENAME,
-    CANONICAL_CROP_CONTRACT,
+    CANONICAL_CROP_CONTRACT_V1,
+    CANONICAL_CROP_CONTRACT_V2,
     CANONICAL_HEAD_POSE_CONTRACT,
-    CANONICAL_INPUT_CONTRACT,
+    CANONICAL_INPUT_CONTRACT_V1,
+    CANONICAL_INPUT_CONTRACT_V2,
     CANONICAL_LABEL_CONTRACT,
+    CANONICAL_SCHEMA_CONTRACTS,
     CanonicalAlignmentEvidence,
     CHECKPOINT_FORMAT_VERSION,
     Evaluation,
@@ -38,7 +41,6 @@ from train_gaze import (
     POSE_PROMPTS,
     QualityGates,
     REQUIRED_COLUMNS,
-    SCHEMA_FOUR_COLUMNS,
     Sample,
     TARGETS_PER_POSE,
     aggregate_angular_training_loss,
@@ -46,6 +48,8 @@ from train_gaze import (
     angular_errors,
     augmentation_config,
     build_candidate_manifest,
+    canonical_columns,
+    canonical_schema,
     claim_final_evaluation_session,
     epoch_evaluation,
     expected_target_label,
@@ -78,7 +82,7 @@ from train_gaze import (
     rgb_to_bgr,
     run_evaluate,
     sample_set_digest,
-    schema_four_quality_diagnostics,
+    canonical_quality_diagnostics,
     select_epoch,
     seed_everything,
     session_id_digest,
@@ -124,11 +128,11 @@ def metadata(schema_version: int, split: str = "training") -> dict:
         "createdAt": "2026-01-01T00:00:00Z",
         "completedAt": "2026-01-01T00:05:00Z",
     }
-    if schema_version == 4:
+    if canonical_schema(schema_version):
         value.update({
             "sourceImageWidth": 1280,
             "sourceImageHeight": 720,
-            "cropContract": CANONICAL_CROP_CONTRACT,
+            "cropContract": CANONICAL_SCHEMA_CONTRACTS[schema_version][0],
             "labelContract": CANONICAL_LABEL_CONTRACT,
             "headPoseContract": CANONICAL_HEAD_POSE_CONTRACT,
         })
@@ -164,7 +168,7 @@ def manifest_row(columns: list[str], sample_number: int,
         "left_image": "eye.png",
         "right_image": "eye.png",
     })
-    if schema_version == 4:
+    if canonical_schema(schema_version):
         row.update({
             "frame_id": str(sample_number),
             "elapsed_s": f"{sample_number * 0.12:.12f}",
@@ -184,10 +188,19 @@ def manifest_row(columns: list[str], sample_number: int,
             "axis_end_y_r": "0.400000000000",
             "alignment_rotation_deg": "0.000000000000",
             "alignment_disagreement_deg": "0.000000000000",
-            "crop_side_px": "230.400000000000",
             "crop_clipped_fraction_l": "0.000000000000",
             "crop_clipped_fraction_r": "0.000000000000",
         })
+        # both fixture axes are 128 source px, so the shared v1 side and the per-eye v2 sides
+        # agree at 1.8 x 128; asymmetric axes are exercised separately
+        row.update(
+            {"crop_side_px": "230.400000000000"}
+            if schema_version == 4
+            else {
+                "crop_side_px_l": "230.400000000000",
+                "crop_side_px_r": "230.400000000000",
+            }
+        )
     return row
 
 
@@ -201,7 +214,9 @@ def write_complete_session(root: Path, schema_version: int, split: str = "traini
         metadata_mutator(session_metadata)
     (session / "session.json").write_text(json.dumps(session_metadata))
     columns = sorted(
-        REQUIRED_COLUMNS | (SCHEMA_FOUR_COLUMNS if schema_version == 4 else set())
+        REQUIRED_COLUMNS | (
+            canonical_columns(schema_version) if canonical_schema(schema_version) else set()
+        )
     )
     with (session / "manifest.csv").open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
@@ -371,19 +386,19 @@ class AngularMetricTests(unittest.TestCase):
 
 class DatasetLoadingTests(unittest.TestCase):
     def test_schema_four_quality_diagnostics_report_raw_evidence_without_thresholds(self):
-        left = EyeQualityEvidence(8, "visionLandmark", 1, (0.1, 0.2), (0.2, 0.2), 0.0)
-        right = EyeQualityEvidence(7, "contourCentroid", 0, (0.7, 0.2), (0.8, 0.2), 0.1)
+        left = EyeQualityEvidence(8, "visionLandmark", 1, (0.1, 0.2), (0.2, 0.2), 0.0, 120.0)
+        right = EyeQualityEvidence(7, "contourCentroid", 0, (0.7, 0.2), (0.8, 0.2), 0.1, 96.0)
         alignment = CanonicalAlignmentEvidence(
-            (1280, 720), left, right, 2.0, 4.0, 120.0,
+            (1280, 720), left, right, 2.0, 4.0, 2,
         )
         sample = Sample(
             session_id="session", split="training", target_id=0, target_kind="lens",
             left_path=Path("left.png"), right_path=Path("right.png"),
-            head_pose=(0, 0, 0), gaze_degrees=(0, 0), schema_version=4,
+            head_pose=(0, 0, 0), gaze_degrees=(0, 0), schema_version=5,
             canonical_alignment=alignment,
         )
 
-        diagnostics = schema_four_quality_diagnostics([sample])
+        diagnostics = canonical_quality_diagnostics([sample])
 
         self.assertIsNotNone(diagnostics)
         assert diagnostics is not None
@@ -392,6 +407,11 @@ class DatasetLoadingTests(unittest.TestCase):
             {"count": 2, "minimum": 0.0, "median": 0.05, "maximum": 0.1},
         )
         self.assertEqual(diagnostics["alignment_disagreement_degrees"]["median"], 4.0)
+        self.assertEqual(
+            diagnostics["crop_side_pixels"],
+            {"count": 2, "minimum": 96.0, "median": 108.0, "maximum": 120.0},
+        )
+        self.assertEqual(diagnostics["crop_side_ratio"]["median"], 0.8)
         self.assertEqual(
             diagnostics["pupil_source_pair_counts"],
             {"visionLandmark+contourCentroid": 1},
@@ -422,31 +442,80 @@ class DatasetLoadingTests(unittest.TestCase):
             self.assertEqual(len(samples[0].session_metadata_sha256), 64)
             self.assertEqual(len(samples[0].manifest_sha256), 64)
 
-    def test_schema_four_loads_only_the_frozen_canonical_contract(self):
-        self.assertEqual(len(REQUIRED_COLUMNS | SCHEMA_FOUR_COLUMNS), 41)
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            write_complete_session(root, 4)
+    def test_canonical_schemas_load_only_their_frozen_contract(self):
+        self.assertEqual(len(REQUIRED_COLUMNS | canonical_columns(4)), 41)
+        self.assertEqual(len(REQUIRED_COLUMNS | canonical_columns(5)), 42)
+        expected_contracts = {
+            4: CANONICAL_INPUT_CONTRACT_V1,
+            5: CANONICAL_INPUT_CONTRACT_V2,
+        }
+        for schema_version, expected_contract in expected_contracts.items():
+            with self.subTest(schema_version=schema_version):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    write_complete_session(root, schema_version)
 
-            samples, _, _ = load_samples(root, "training")
+                    samples, _, _ = load_samples(root, "training")
 
-            self.assertEqual(len(samples), 810)
-            self.assertEqual(samples[0].input_contract, CANONICAL_INPUT_CONTRACT)
-            self.assertEqual(
-                samples[0].label_contract_sha256, label_contract_digest()
-            )
-            evidence = samples[0].canonical_alignment
-            self.assertIsNotNone(evidence)
-            assert evidence is not None
-            self.assertEqual(evidence.source_image_size, (1280, 720))
-            self.assertEqual(evidence.crop_side_pixels, 230.4)
-            changed = replace(
-                samples[0],
-                canonical_alignment=replace(evidence, crop_side_pixels=230.5),
-            )
-            self.assertNotEqual(
-                sample_set_digest([samples[0]]), sample_set_digest([changed])
-            )
+                    self.assertEqual(len(samples), 810)
+                    self.assertEqual(samples[0].input_contract, expected_contract)
+                    self.assertEqual(
+                        samples[0].label_contract_sha256, label_contract_digest()
+                    )
+                    evidence = samples[0].canonical_alignment
+                    self.assertIsNotNone(evidence)
+                    assert evidence is not None
+                    self.assertEqual(evidence.source_image_size, (1280, 720))
+                    self.assertEqual(evidence.left.crop_side_pixels, 230.4)
+                    self.assertEqual(evidence.right.crop_side_pixels, 230.4)
+                    changed = replace(
+                        samples[0],
+                        canonical_alignment=replace(
+                            evidence,
+                            left=replace(evidence.left, crop_side_pixels=230.5),
+                        ),
+                    )
+                    self.assertNotEqual(
+                        sample_set_digest([samples[0]]), sample_set_digest([changed])
+                    )
+
+    def test_v2_renders_each_eye_at_its_own_scale_while_v1_shares_the_longer(self):
+        # the right axis is 0.05 wide against the left's 0.10, as head yaw foreshortens the far
+        # eye. v1 scales both crops by 1.8 x the longer axis, so the far eye is rendered at half
+        # scale; v2 gives each eye its own side, so both render identically.
+        def narrow_right_eye(row, sample_number):
+            row["axis_end_x_r"] = "0.700000000000"
+            if "crop_side_px_r" in row:
+                row["crop_side_px_r"] = "115.200000000000"
+
+        def loaded_alignment(schema_version):
+            with tempfile.TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                write_complete_session(
+                    root, schema_version, row_mutator=narrow_right_eye
+                )
+                samples, _, _ = load_samples(root, "training")
+                evidence = samples[0].canonical_alignment
+                assert evidence is not None
+                return evidence
+
+        v1 = loaded_alignment(4)
+        self.assertEqual(v1.left.crop_side_pixels, 230.4)
+        self.assertEqual(v1.right.crop_side_pixels, 230.4)
+        # the shared side comes from the near eye, so the far eye's own axis covers half as much
+        # of its crop: rendered scale carries the head yaw that produced the foreshortening
+        self.assertAlmostEqual(128.0 / v1.left.crop_side_pixels, 0.5555555555555556)
+        self.assertAlmostEqual(64.0 / v1.right.crop_side_pixels, 0.2777777777777778)
+
+        v2 = loaded_alignment(5)
+        self.assertEqual(v2.left.crop_side_pixels, 230.4)
+        self.assertEqual(v2.right.crop_side_pixels, 115.2)
+        # each eye's own axis spans the same fraction of its own crop, so an eye's rendered scale
+        # no longer depends on how far the head is turned away from it
+        self.assertAlmostEqual(
+            128.0 / v2.left.crop_side_pixels, 64.0 / v2.right.crop_side_pixels
+        )
+        self.assertAlmostEqual(64.0 / v2.right.crop_side_pixels, 1 / 1.8)
 
     def test_schema_four_rejects_missing_head_pose_provenance(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -460,18 +529,28 @@ class DatasetLoadingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "head-pose contract"):
                 load_samples(root, "training")
 
-    def test_schema_four_rejects_tampered_derived_alignment(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
+    def test_canonical_schemas_reject_tampered_derived_alignment(self):
+        # every serialized crop side must still be recomputable from the raw axes, including
+        # each of v2's two per-eye sides
+        tampered_columns = {
+            4: ("alignment_rotation_deg", "crop_side_px"),
+            5: ("alignment_rotation_deg", "crop_side_px_l", "crop_side_px_r"),
+        }
+        for schema_version, columns in tampered_columns.items():
+            for column in columns:
+                with self.subTest(schema_version=schema_version, column=column):
+                    def tamper(row, sample_number, column=column):
+                        if sample_number == 1:
+                            row[column] = f"{float(row[column]) + 1:.12f}"
 
-            def tamper(row, sample_number):
-                if sample_number == 1:
-                    row["alignment_rotation_deg"] = "1.000000000000"
+                    with tempfile.TemporaryDirectory() as temporary_directory:
+                        root = Path(temporary_directory)
+                        write_complete_session(root, schema_version, row_mutator=tamper)
 
-            write_complete_session(root, 4, row_mutator=tamper)
-
-            with self.assertRaisesRegex(ValueError, "derived alignment evidence"):
-                load_samples(root, "training")
+                        with self.assertRaisesRegex(
+                            ValueError, "derived alignment evidence"
+                        ):
+                            load_samples(root, "training")
 
     def test_schema_four_accepts_finite_out_of_frame_axes_with_recomputed_clipping(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1488,7 +1567,7 @@ class CandidateManifestTests(unittest.TestCase):
                     seed,
                     score,
                     "baseline",
-                    input_contract=CANONICAL_INPUT_CONTRACT,
+                    input_contract=CANONICAL_INPUT_CONTRACT_V2,
                 )
                 for seed, score in zip(seeds, (0.70, 0.72, 0.74))
             ]

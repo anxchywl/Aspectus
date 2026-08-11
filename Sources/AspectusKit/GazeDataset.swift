@@ -5,8 +5,10 @@ public enum GazeDatasetSplit: String, Codable, Sendable, CaseIterable {
     case validation
 }
 
-public enum GazeDatasetSchema4 {
-    public static let version = 4
+/// Schema 5 differs from schema 4 in one declared factor: the crop side is per eye rather than one
+/// shared side taken from the longer axis, so rendered eye scale no longer varies with head yaw.
+public enum GazeDatasetSchema5 {
+    public static let version = 5
     public static let manifestColumns = [
         "schema_version", "participant_id", "session_id", "split", "sample", "frame_id",
         "elapsed_s", "target_id", "target_kind", "target_x", "target_y", "target_yaw_deg",
@@ -15,8 +17,8 @@ public enum GazeDatasetSchema4 {
         "contour_points_r", "pupil_source_l", "pupil_source_r", "pupil_points_l",
         "pupil_points_r", "axis_start_x_l", "axis_start_y_l", "axis_end_x_l", "axis_end_y_l",
         "axis_start_x_r", "axis_start_y_r", "axis_end_x_r", "axis_end_y_r",
-        "alignment_rotation_deg", "alignment_disagreement_deg", "crop_side_px",
-        "crop_clipped_fraction_l", "crop_clipped_fraction_r",
+        "alignment_rotation_deg", "alignment_disagreement_deg", "crop_side_px_l",
+        "crop_side_px_r", "crop_clipped_fraction_l", "crop_clipped_fraction_r",
     ]
 }
 
@@ -132,13 +134,13 @@ public struct GazeDatasetCropContract: Codable, Sendable, Equatable {
     public var sampling: String
     public var colorSpace: String
 
-    public static let canonicalPairedEyesV1 = GazeDatasetCropContract(
-        version: 1,
+    public static let canonicalPairedEyesV2 = GazeDatasetCropContract(
+        version: 2,
         coordinateSpace: "source-image-fraction-top-left",
         axisExtractor: "farthest-contour-pair-ordered-image-x",
         alignment: "circular-mean-paired-eye-axes",
         center: "per-eye-axis-midpoint",
-        scale: "\(GazeDatasetCanonicalAlignment.cropScale)x-maximum-eye-axis-length-pixels",
+        scale: "\(GazeDatasetCanonicalAlignment.cropScale)x-own-eye-axis-length-pixels",
         outputWidth: GazeDatasetCanonicalAlignment.outputWidth,
         outputHeight: GazeDatasetCanonicalAlignment.outputHeight,
         sampling: "core-image-affine-hq-downsample-edge-clamp",
@@ -183,6 +185,10 @@ public struct GazeDatasetCanonicalAlignment: Sendable, Equatable {
     public struct EyeCrop: Sendable, Equatable {
         public var centerX: Double
         public var centerY: Double
+        /// `cropScale ×` this eye's own axis length. Deriving the side per eye rather than from the
+        /// longer of the pair keeps rendered eye scale invariant: under head yaw the far eye is
+        /// foreshortened, and a shared side would render it smaller in proportion to that yaw.
+        public var cropSidePixels: Double
         public var clippedFraction: Double
     }
 
@@ -192,7 +198,6 @@ public struct GazeDatasetCanonicalAlignment: Sendable, Equatable {
 
     public var rotationRadians: Double
     public var disagreementDegrees: Double
-    public var cropSidePixels: Double
     public var left: EyeCrop
     public var right: EyeCrop
 
@@ -224,20 +229,24 @@ public struct GazeDatasetCanonicalAlignment: Sendable, Equatable {
         rotationRadians = atan2(sine, cosine)
         disagreementDegrees = abs(atan2(sin(leftAxis.angle - rightAxis.angle),
                                         cos(leftAxis.angle - rightAxis.angle))) * 180 / .pi
-        cropSidePixels = Self.cropScale * max(leftAxis.length, rightAxis.length)
-        guard cropSidePixels.isFinite, cropSidePixels > 1e-6 else { return nil }
+        let leftSide = Self.cropScale * leftAxis.length
+        let rightSide = Self.cropScale * rightAxis.length
+        guard leftSide.isFinite, leftSide > 1e-6,
+              rightSide.isFinite, rightSide > 1e-6 else { return nil }
         self.left = EyeCrop(
             centerX: leftAxis.center.x,
             centerY: leftAxis.center.y,
+            cropSidePixels: leftSide,
             clippedFraction: Self.clippedFraction(
                 center: leftAxis.center, rotation: rotationRadians,
-                side: cropSidePixels, width: width, height: height))
+                side: leftSide, width: width, height: height))
         self.right = EyeCrop(
             centerX: rightAxis.center.x,
             centerY: rightAxis.center.y,
+            cropSidePixels: rightSide,
             clippedFraction: Self.clippedFraction(
                 center: rightAxis.center, rotation: rotationRadians,
-                side: cropSidePixels, width: width, height: height))
+                side: rightSide, width: width, height: height))
     }
 
     private struct Point {
