@@ -339,8 +339,19 @@ final class GazeDatasetRecorder: @unchecked Sendable {
             session.totalSamples += 1
             session.samplesForTarget += 1
             if session.samplesForTarget >= GazeDatasetPlan.samplesPerTarget {
+                let completedPose = session.targets[session.targetIndex].pose
                 session.targetIndex += 1
                 session.samplesForTarget = 0
+                // The neutral block is what defines the baseline every later block is measured
+                // against, so this is the first moment the session can be checked against the pose
+                // it actually recorded. Checking here turns a six-minute dead end into a
+                // forty-second one.
+                if completedPose == .neutral,
+                   session.targets.indices.contains(session.targetIndex),
+                   session.targets[session.targetIndex].pose != .neutral,
+                   let unreachable = Self.unreachableBlockMessage(session: session) {
+                    session.status = .failed(unreachable)
+                }
             }
             if session.targetIndex >= session.targets.count {
                 session.status = .finished
@@ -349,6 +360,20 @@ final class GazeDatasetRecorder: @unchecked Sendable {
             return session.isCollecting ? nil : session
         }
         if let completed { try? writeMetadata(completed, completedAt: Date()) }
+    }
+
+    /// Reports the first upcoming block the recorded baseline cannot satisfy, naming the axis and
+    /// the numbers, so stopping here is self-explanatory rather than another silent dead end.
+    private static func unreachableBlockMessage(session: Session) -> String? {
+        guard let baseline = session.posePromptGate.baseline else { return nil }
+        let posture = GazeDatasetPosture(yawDegrees: baseline.yawDegrees,
+                                         pitchDegrees: baseline.pitchDegrees,
+                                         rollDegrees: baseline.rollDegrees)
+        guard !posture.isReady, let advice = posture.advice else { return nil }
+        return String(format: "the tilt blocks cannot be reached from this seating: your neutral "
+                      + "baseline recorded %+.0f° of roll, and a tilt has to change roll by 6° "
+                      + "while staying inside 15° absolute. %@",
+                      baseline.rollDegrees, advice)
     }
 
     private func failWrite(sessionID: String, message: String) {

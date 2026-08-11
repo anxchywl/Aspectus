@@ -105,12 +105,22 @@ final class GazeDatasetAcceptanceTests: XCTestCase {
         XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(openness: 0.2)), .eyesClosed)
         XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(poseAvailable: false)),
                        .headPoseUnavailable)
-        XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(yawDegrees: 30)), .headPose)
         XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(rollDegrees: 21)), .headPose)
         XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(pitchDegrees: .nan)), .headPose)
         XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(eyeWidth: 0)), .degenerateEyes)
         XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(eyeX: 1.1)), .degenerateEyes)
         XCTAssertEqual(GazeDatasetAcceptance.rejection(tracking(eyeX: .nan)), .degenerateEyes)
+    }
+
+    /// The protocol's filter table declares face confidence, eye openness and absolute roll, and
+    /// no absolute yaw or pitch bound. An earlier 25 degree cap on both made `lookDown`
+    /// unsatisfiable for a baseline above 20 degrees, which is a real seating position when the
+    /// camera sits below eye height; a recorded session measured a +21.2 degree neutral baseline
+    /// and never accepted a single chin-down sample.
+    func testYawAndPitchCarryNoAbsoluteBound() {
+        XCTAssertNil(GazeDatasetAcceptance.rejection(tracking(yawDegrees: 30)))
+        XCTAssertNil(GazeDatasetAcceptance.rejection(tracking(pitchDegrees: 26.2)))
+        XCTAssertNil(GazeDatasetAcceptance.rejection(tracking(pitchDegrees: -30)))
     }
 
     func testSchemaFourRequiresObservableEyeAxes() {
@@ -139,28 +149,61 @@ final class GazeDatasetPostureTests: XCTestCase {
         XCTAssertNil(posture.advice)
     }
 
-    func testAHighRestingPitchCannotReachTheChinDownBlock() {
-        // the acceptance limit is absolute at 25 degrees and chin-down needs 5 degrees more pitch
-        // than neutral, so a participant resting at 21 has nowhere to go
-        let posture = GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 21, rollDegrees: 0)
+    /// The measured session that exposed the cap: a +21.2 degree neutral baseline. With no
+    /// absolute pitch bound this seating reaches every block, so it must not be reported as a
+    /// blocker any more.
+    func testAHighRestingPitchNowReachesTheChinDownBlock() {
+        let posture = GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 21.2, rollDegrees: 0)
+
+        XCTAssertTrue(posture.isReady)
+        XCTAssertNil(posture.advice)
+    }
+
+    func testATurnedRestingYawStillReachesEveryBlock() {
+        XCTAssertTrue(GazeDatasetPosture(yawDegrees: 24, pitchDegrees: 0, rollDegrees: 0).isReady)
+    }
+
+    /// roll is the one axis that can still trap a participant, because the tilt gate is bounded
+    func testARestingRollCanStillMakeTheTiltBlocksUnreachable() {
+        let posture = GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 0, rollDegrees: 12)
 
         XCTAssertFalse(posture.isReady)
-        XCTAssertEqual(posture.pitchHeadroom, -1, accuracy: 1e-9)
-        XCTAssertEqual(posture.advice?.contains("raise the display"), true)
+        XCTAssertEqual(posture.rollHeadroom, -3, accuracy: 1e-9)
+        XCTAssertEqual(posture.advice?.contains("tilted to one side"), true)
     }
 
-    func testTheAdviceNamesTheAxisWithTheLeastRoom() {
-        XCTAssertEqual(
-            GazeDatasetPosture(yawDegrees: 24, pitchDegrees: 0, rollDegrees: 0).advice?
-                .contains("square your chair"), true)
-        XCTAssertEqual(
-            GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 0, rollDegrees: 12).advice?
-                .contains("tilted to one side"), true)
+    func testTheRollBoundaryIsReachableButHasNoMargin() {
+        XCTAssertTrue(GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 0, rollDegrees: 9).isReady)
+        XCTAssertFalse(GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 0, rollDegrees: 9.5).isReady)
     }
 
-    func testTheBoundaryIsReachableButHasNoMargin() {
-        XCTAssertTrue(GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 20, rollDegrees: 0).isReady)
-        XCTAssertFalse(GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 20.5, rollDegrees: 0).isReady)
+    func testTheGateReportsTheBaselineItLearnedFromTheNeutralBlock() {
+        var gate = GazePosePromptGate()
+        XCTAssertNil(gate.baseline)
+
+        _ = gate.evaluate(.neutral, yawDegrees: 0, pitchDegrees: 20, rollDegrees: 2)
+        _ = gate.evaluate(.neutral, yawDegrees: 0, pitchDegrees: 22.4, rollDegrees: 3)
+
+        XCTAssertEqual(gate.baseline?.pitchDegrees ?? 0, 21.2, accuracy: 1e-9)
+        XCTAssertEqual(gate.baseline?.rollDegrees ?? 0, 2.5, accuracy: 1e-9)
+    }
+
+    /// the whole point of removing the cap: chin-down from tonight's measured baseline
+    func testChinDownIsAcceptedFromAHighNeutralBaseline() {
+        var gate = GazePosePromptGate()
+        _ = gate.evaluate(.neutral, yawDegrees: 0, pitchDegrees: 21.2, rollDegrees: 0)
+
+        XCTAssertEqual(
+            gate.evaluate(.lookDown, yawDegrees: 0, pitchDegrees: 26.2, rollDegrees: 0),
+            .accepted)
+        XCTAssertNil(GazeDatasetAcceptance.rejection(
+            TrackingResult(faceBounds: .init(x: 0.1, y: 0.1, width: 0.8, height: 0.8),
+                           leftEye: .init(region: .init(x: 0.2, y: 0.2, width: 0.08, height: 0.03),
+                                          pupilCenter: .init(x: 0.24, y: 0.215), openness: 0.8),
+                           rightEye: .init(region: .init(x: 0.2, y: 0.2, width: 0.08, height: 0.03),
+                                           pupilCenter: .init(x: 0.24, y: 0.215), openness: 0.8),
+                           headPose: .init(yaw: 0, pitch: 26.2 * .pi / 180, roll: 0),
+                           confidence: 0.9, headPoseAvailable: true)))
     }
 }
 

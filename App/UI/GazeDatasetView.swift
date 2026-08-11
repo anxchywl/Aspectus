@@ -446,9 +446,9 @@ struct GazeDatasetView: View {
         case .lowConfidence: return "use steadier, clearer lighting"
         case .eyesClosed: return "open both eyes"
         case .headPoseUnavailable: return "hold your face clearly in view"
-        // the limit applies to yaw, pitch and roll, so naming only turning sends a participant
-        // whose chin is too low looking for a problem with how far they have turned
-        case .headPose: return "your head is past the tracking limit; return toward level"
+        // the only absolute bound left is roll, so this can name the axis outright instead of
+        // sending the participant to guess which way they are past a limit
+        case .headPose: return "your head is tilted too far to one side; level it"
         case .posePrompt: return "move farther in the requested head direction"
         case .posePromptOvershoot: return "ease back toward centre; that is farther than needed"
         case .degenerateEyes: return "move a little closer"

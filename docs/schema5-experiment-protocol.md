@@ -156,6 +156,23 @@ The disagreement filter starts inert deliberately. No threshold is defensible fr
 schema-4 session that has been measured, and adopting one from those numbers would be tuning on an
 observed outcome. It is a declared factor under section 8, not part of the baseline.
 
+### Collector reconciliation, 2026-08-11
+
+This table is the complete set of quality filters. The collector additionally enforced an
+undeclared absolute bound of `25°` on yaw and pitch, carried over from the pre-protocol collection
+commit and never reconciled with this table when the protocol was frozen. It has been removed.
+
+The bound was not a spare margin. `lookDown` requires `≥ +5°` of pitch beyond the session's own
+neutral baseline, so any baseline above `20°` left an empty accepting window and the block could
+never complete. A recorded training session measured a `+21.2°` neutral baseline — a camera below
+eye height — completed `neutral`, `turnLeft`, `turnRight` and `lookUp` at 162 rows each, and
+accepted zero `lookDown` samples before being stopped. The undeclared bound made this protocol
+unexecutable at that seating while silently withholding rows the protocol asks to be recorded.
+
+Removing it changes no declared threshold and no recorded value. Absolute roll stays bounded at
+`20°` here and the tilt gate at `15°`, both declared above and reasoned about in section 3. No
+schema-5 session had been completed when this was found, so no recorded session is affected.
+
 ## 7. Gates and selection
 
 The analysis grain is a retained paired-eye sample. Splits, checkpoint selection and gates remain

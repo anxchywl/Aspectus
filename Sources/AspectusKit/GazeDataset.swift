@@ -342,43 +342,32 @@ public struct GazeDatasetCanonicalAlignment: Sendable, Equatable {
     }
 }
 
-/// A pose gate measured against the participant's own neutral baseline becomes unreachable when
-/// that baseline already sits near the absolute acceptance limit. Chin-down needs five degrees more
-/// pitch than neutral while acceptance refuses beyond twenty-five degrees absolute, so a
-/// participant resting at twenty-one degrees has nowhere left to go and the block can never
-/// complete. That is a seating and camera-height problem, and it is worth catching before a session
-/// rather than six minutes into one.
+/// A pose gate measured against the participant's own neutral baseline can be unreachable when that
+/// baseline already sits near an absolute bound: the tilt blocks ask for six degrees of roll beyond
+/// neutral while staying inside fifteen degrees absolute, so a participant whose head already rests
+/// at ten degrees of roll has nowhere left to go and the block can never complete. That is a seating
+/// problem, and it is worth catching before a session rather than six minutes into one.
+///
+/// Roll is the only axis that can trap a participant this way. Yaw and pitch carry no absolute
+/// bound — the protocol declares none, and the collector no longer invents one — so their blocks
+/// stay reachable from any resting position.
 public struct GazeDatasetPosture: Sendable, Equatable {
-    public var yawHeadroom: Double
-    public var pitchHeadroom: Double
     public var rollHeadroom: Double
 
     public init(yawDegrees: Double, pitchDegrees: Double, rollDegrees: Double,
-                acceptance: GazeDatasetAcceptance.Config = .init(),
                 gate: GazePosePromptGate.Config = .init()) {
-        yawHeadroom = acceptance.maximumHeadPoseDegrees
-            - (abs(yawDegrees) + gate.minimumHorizontalChangeDegrees)
-        pitchHeadroom = acceptance.maximumHeadPoseDegrees
-            - (abs(pitchDegrees) + gate.minimumVerticalChangeDegrees)
         rollHeadroom = gate.maximumAbsoluteRollDegrees
             - (abs(rollDegrees) + gate.minimumRollChangeDegrees)
     }
 
     public var isReady: Bool { worstHeadroom >= 0 }
 
-    public var worstHeadroom: Double { min(yawHeadroom, min(pitchHeadroom, rollHeadroom)) }
+    public var worstHeadroom: Double { rollHeadroom }
 
-    /// names the axis with the least room and which way to move, because "reposition" on its own
-    /// does not tell anyone whether to raise the camera or turn the chair
+    /// names the axis and which way to move, because "reposition" on its own does not tell anyone
+    /// what to actually change
     public var advice: String? {
         guard !isReady else { return nil }
-        if pitchHeadroom <= yawHeadroom && pitchHeadroom <= rollHeadroom {
-            return "your head rests too far from level vertically; raise the display or lower "
-                + "your seat until the chin-up and chin-down blocks have room"
-        }
-        if yawHeadroom <= rollHeadroom {
-            return "your head rests turned away from the camera; square your chair to the display"
-        }
         return "your head rests tilted to one side; level it before starting"
     }
 }
@@ -539,6 +528,22 @@ public struct GazePosePromptGate: Sendable, Equatable {
         return change >= config.minimumRollChangeDegrees ? .accepted : .insufficient
     }
 
+    /// The learned neutral baseline, once the neutral block has contributed samples. Exposed so a
+    /// session can be checked against the pose it actually recorded rather than against a single
+    /// instant sampled on the setup screen: the two differ, and trusting the latter is how an
+    /// unreachable block reached block five undetected.
+    public struct Baseline: Sendable, Equatable {
+        public var yawDegrees: Double
+        public var pitchDegrees: Double
+        public var rollDegrees: Double
+    }
+
+    public var baseline: Baseline? {
+        guard let neutralYaw, let neutralPitch, let neutralRoll else { return nil }
+        return Baseline(yawDegrees: neutralYaw, pitchDegrees: neutralPitch,
+                        rollDegrees: neutralRoll)
+    }
+
     private var neutralYaw: Double? {
         neutralSamples > 0 ? neutralYawTotal / Double(neutralSamples) : nil
     }
@@ -579,19 +584,23 @@ public struct GazeDatasetSettleGate: Sendable, Equatable {
 
 /// collection gate kept in the core so labelled images cannot bypass it silently
 public enum GazeDatasetAcceptance {
+    /// These are exactly the filters the frozen protocol declares, and deliberately no more.
+    /// An earlier absolute yaw/pitch bound of twenty-five degrees predated the protocol and was
+    /// never reconciled with its filter table; because the pose gate asks for five degrees of
+    /// pitch beyond the participant's own neutral baseline, that bound made `lookDown`
+    /// unsatisfiable for anyone whose baseline sat above twenty degrees — a camera below eye
+    /// height — and it silently withheld rows the protocol asks to be recorded. Roll stays
+    /// bounded because the protocol declares that one and reasons about it explicitly.
     public struct Config: Sendable, Equatable {
         public var minimumFaceConfidence: Double
         public var minimumOpenness: Double
-        public var maximumHeadPoseDegrees: Double
         public var maximumHeadRollDegrees: Double
 
         public init(minimumFaceConfidence: Double = 0.70,
                     minimumOpenness: Double = 0.40,
-                    maximumHeadPoseDegrees: Double = 25.0,
                     maximumHeadRollDegrees: Double = 20.0) {
             self.minimumFaceConfidence = minimumFaceConfidence
             self.minimumOpenness = minimumOpenness
-            self.maximumHeadPoseDegrees = maximumHeadPoseDegrees
             self.maximumHeadRollDegrees = maximumHeadRollDegrees
         }
     }
@@ -607,10 +616,8 @@ public enum GazeDatasetAcceptance {
         let pose = [tracking.headPose.yaw, tracking.headPose.pitch, tracking.headPose.roll]
         guard pose.allSatisfy(\.isFinite) else { return .headPose }
         let degrees = 180.0 / Double.pi
-        let worst = max(abs(tracking.headPose.yaw), abs(tracking.headPose.pitch)) * degrees
         let roll = abs(tracking.headPose.roll) * degrees
-        guard worst <= config.maximumHeadPoseDegrees,
-              roll <= config.maximumHeadRollDegrees else { return .headPose }
+        guard roll <= config.maximumHeadRollDegrees else { return .headPose }
         guard usableImageRegion(tracking.leftEye.region),
               usableImageRegion(tracking.rightEye.region) else { return .degenerateEyes }
         if imageWidth != nil || imageHeight != nil {
