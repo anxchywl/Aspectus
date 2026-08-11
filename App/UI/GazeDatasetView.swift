@@ -74,9 +74,12 @@ struct GazeDatasetView: View {
     private var setup: some View {
         // centred as a pair rather than stretched to the window: full screen is a very tall canvas
         // for a setup form, and pinning the actions to the bottom edge strands them
-        HStack(alignment: .top, spacing: 36) {
-            setupDetails.frame(width: 520, alignment: .leading)
-            setupPreview.frame(width: 500, alignment: .leading)
+        VStack(spacing: 28) {
+            HStack(alignment: .top, spacing: 36) {
+                setupDetails.frame(width: 520, alignment: .leading)
+                setupPreview.frame(width: 500, alignment: .leading)
+            }
+            setupActions.frame(width: 520 + 36 + 500, alignment: .center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .padding(44)
@@ -134,50 +137,55 @@ struct GazeDatasetView: View {
             .fixedSize(horizontal: false, vertical: true)
             .labelStyle(.aligned)
 
+            if let error = controller.datasetError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(.orange)
+                    .labelStyle(.aligned)
+            }
+        }
+    }
+
+    /// spans both columns and centres under them, rather than sitting inside the left column,
+    /// since these actions apply to the whole screen (session count, start, data management) —
+    /// not to the description text beside them
+    private var setupActions: some View {
+        VStack(spacing: 14) {
             Text(recorded.training + recorded.validation == 0
                  ? "no schema-\(GazeDatasetSchema5.version) sessions recorded yet"
                  : "schema-\(GazeDatasetSchema5.version) sessions so far: "
                    + "\(recorded.training) training · \(recorded.validation) validation")
                 .font(.callout.monospaced()).foregroundStyle(.tertiary)
 
-            if let error = controller.datasetError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout).foregroundStyle(.orange)
-                    .labelStyle(.aligned)
-            }
-
-            VStack(spacing: 14) {
-                if isFullScreen {
-                    Button("Start \(nextSplit == .training ? "training" : "validation") session") {
-                        controller.startGazeDataset(nextSplit)
-                    }
+            if isFullScreen {
+                Button("Start \(nextSplit == .training ? "training" : "validation") session") {
+                    controller.startGazeDataset(nextSplit)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!controller.isRunning)
+                .help(controller.isRunning
+                      ? "Begin collecting" : "The camera has to be running first")
+            } else {
+                Button("Enter full screen") { datasetWindow?.toggleFullScreen(nil) }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!controller.isRunning)
-                    .help(controller.isRunning
-                          ? "Begin collecting" : "The camera has to be running first")
-                } else {
-                    Button("Enter full screen") { datasetWindow?.toggleFullScreen(nil) }
-                        .buttonStyle(.borderedProminent)
-                }
-
-                if !isFullScreen {
-                    Text("Collection starts after this window enters full screen.")
-                        .font(.caption).foregroundStyle(.orange)
-                }
-
-                HStack(spacing: 12) {
-                    Button("Reveal collected data") { revealData() }
-                        .disabled(!hasCollectedData)
-                    Button("Delete collected data", role: .destructive) {
-                        confirmingDelete = true
-                    }
-                    .disabled(!hasCollectedData)
-                    Button("Close") { dismissWindow(id: "gaze-dataset") }
-                }
-                .font(.caption)
             }
-            .frame(maxWidth: .infinity, alignment: .center)
+
+            if !isFullScreen {
+                Text("Collection starts after this window enters full screen.")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+
+            HStack(spacing: 12) {
+                Button("Reveal collected data") { revealData() }
+                    .disabled(!hasCollectedData)
+                Button("Delete collected data", role: .destructive) {
+                    confirmingDelete = true
+                }
+                .disabled(!hasCollectedData)
+                Button("Close") { dismissWindow(id: "gaze-dataset") }
+            }
+            .font(.caption)
         }
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     /// the picture answers the questions the numbers cannot: whether the framing, lighting and
