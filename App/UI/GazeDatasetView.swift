@@ -72,7 +72,8 @@ struct GazeDatasetView: View {
             Image(systemName: "eye.square")
                 .font(.system(size: 54)).foregroundStyle(.cyan)
             Text("Collect gaze model data").font(.largeTitle.weight(.semibold))
-            Text("A dot will move across the display while you hold five gentle head positions. "
+            Text("A dot will move across the display while you hold "
+                 + "\(GazePosePrompt.allCases.count) gentle head positions. "
                  + "Look at the dot with your eyes and keep the requested head position steady.")
                 .font(.title3).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center).frame(maxWidth: 680)
