@@ -468,7 +468,15 @@ final class PipelineController: ObservableObject {
     // MARK: - gaze model dataset
 
     func startGazeDataset(_ split: GazeDatasetSplit) {
-        guard isRunning, calibrationProgress == nil else { return }
+        // a silent return here reads as a dead button: collection needs live frames, so say so
+        guard isRunning else {
+            datasetError = "Start the camera before collecting."
+            return
+        }
+        guard calibrationProgress == nil else {
+            datasetError = "Finish or cancel calibration before collecting."
+            return
+        }
         datasetError = nil
         do {
             try datasetRecorder.start(

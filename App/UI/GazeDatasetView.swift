@@ -120,6 +120,9 @@ struct GazeDatasetView: View {
                         controller.startGazeDataset(split)
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(!controller.isRunning)
+                    .help(controller.isRunning
+                          ? "Begin collecting" : "The camera has to be running first")
                 } else {
                     Button("Enter full screen") { datasetWindow?.toggleFullScreen(nil) }
                         .buttonStyle(.borderedProminent)
@@ -175,13 +178,20 @@ struct GazeDatasetView: View {
         } else {
             // without tracking there is nothing to check, and silently omitting the panel would
             // read as a pass rather than as an unanswered question
-            Label(controller.isRunning
-                  ? "waiting for the tracker to find your face"
-                  : "start the camera to check your seating before collecting",
-                  systemImage: "video.slash")
-                .font(.callout).foregroundStyle(.secondary)
-                .padding(.horizontal, 18).padding(.vertical, 12)
-                .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+            VStack(spacing: 10) {
+                Label(controller.isRunning
+                      ? "waiting for the tracker to find your face"
+                      : "the camera is off, so collection cannot start",
+                      systemImage: "video.slash")
+                    .font(.callout)
+                    .foregroundStyle(controller.isRunning ? Color.secondary : Color.orange)
+                if !controller.isRunning {
+                    Button("Start camera") { Task { await controller.start() } }
+                        .buttonStyle(.bordered)
+                }
+            }
+            .padding(.horizontal, 18).padding(.vertical, 12)
+            .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
         }
     }
 
