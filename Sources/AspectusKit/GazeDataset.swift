@@ -440,6 +440,54 @@ public struct GazePosePromptGate: Sendable, Equatable {
         }
     }
 
+    /// live read of how far the prompted axis has moved, so the collector can show the distance
+    /// to the accepting band instead of only naming the failure. `towardGoal` is signed so that
+    /// positive is the prompted direction whatever that direction happens to be.
+    public struct Guidance: Sendable, Equatable {
+        public enum Axis: String, Sendable, Equatable { case yaw, pitch, roll }
+
+        public var axis: Axis
+        public var towardGoal: Double
+        public var minimum: Double
+        public var absolute: Double
+        /// nil when the axis carries no absolute bound
+        public var maximum: Double?
+    }
+
+    public func guidance(for prompt: GazePosePrompt,
+                         yawDegrees: Double, pitchDegrees: Double,
+                         rollDegrees: Double) -> Guidance? {
+        switch prompt {
+        case .neutral:
+            return nil
+        case .turnLeft, .turnRight:
+            guard let baseline = neutralYaw else { return nil }
+            let change = yawDegrees - baseline
+            // turnLeft latches whichever direction the participant moved first, so before that
+            // latch either direction counts and the magnitude is the honest read
+            let sign = leftYawSign.map { prompt == .turnLeft ? $0 : -$0 }
+            return Guidance(axis: .yaw,
+                            towardGoal: sign.map { change * $0 } ?? abs(change),
+                            minimum: config.minimumHorizontalChangeDegrees,
+                            absolute: abs(yawDegrees), maximum: nil)
+        case .lookUp, .lookDown:
+            guard let baseline = neutralPitch else { return nil }
+            let change = pitchDegrees - baseline
+            return Guidance(axis: .pitch,
+                            towardGoal: prompt == .lookUp ? -change : change,
+                            minimum: config.minimumVerticalChangeDegrees,
+                            absolute: abs(pitchDegrees), maximum: nil)
+        case .tiltLeft, .tiltRight:
+            guard let baseline = neutralRoll else { return nil }
+            let sign = prompt == .tiltLeft ? Self.tiltLeftRollSign : -Self.tiltLeftRollSign
+            return Guidance(axis: .roll,
+                            towardGoal: (rollDegrees - baseline) * sign,
+                            minimum: config.minimumRollChangeDegrees,
+                            absolute: abs(rollDegrees),
+                            maximum: config.maximumAbsoluteRollDegrees)
+        }
+    }
+
     /// requires the prompted direction and enough change, then keeps the sample inside the
     /// trainer's absolute-roll filter rather than coaching the participant past it. Overshoot is
     /// reported separately so the coaching can tell the participant to ease back.

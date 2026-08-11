@@ -155,6 +155,14 @@ struct ContentView: View {
             }
             .help(controller.isRunning ? "Stop the camera" : "Start the camera")
 
+            Toggle(isOn: $controller.showOverlay) {
+                Label("Overlay",
+                      systemImage: controller.showOverlay
+                          ? "viewfinder.rectangular" : "viewfinder")
+            }
+            .toggleStyle(.button)
+            .help("Show or hide the face and eye tracking boxes over the preview")
+
             Button {
                 ui.showDiagnostics.toggle()
             } label: {

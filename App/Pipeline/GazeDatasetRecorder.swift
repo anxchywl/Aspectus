@@ -26,6 +26,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         var samplesForTarget: Int
         var totalSamples: Int
         var rejection: GazeDatasetRejection?
+        var guidance: GazePosePromptGate.Guidance?
         var directoryPath: String
 
         var progress: Double {
@@ -101,6 +102,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         var lastCaptureAt = -Double.infinity
         var writeInFlight = false
         var rejection: GazeDatasetRejection?
+        var guidance: GazePosePromptGate.Guidance?
         var status: Status = .collecting
         var createdAt = Date()
         var startedAtHost: Double
@@ -220,6 +222,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
                             samplesForTarget: session.samplesForTarget,
                             totalSamples: session.totalSamples,
                             rejection: session.rejection,
+                            guidance: session.guidance,
                             directoryPath: session.directory.path)
         }
     }
@@ -257,6 +260,11 @@ final class GazeDatasetRecorder: @unchecked Sendable {
                 pitchDegrees: tracking.headPose.pitch * degrees,
                 rollDegrees: tracking.headPose.roll * degrees)
             let poseAccepted = poseOutcome == .accepted
+            session.guidance = session.posePromptGate.guidance(
+                for: target.pose,
+                yawDegrees: tracking.headPose.yaw * degrees,
+                pitchDegrees: tracking.headPose.pitch * degrees,
+                rollDegrees: tracking.headPose.roll * degrees)
             let previousPose = session.targetIndex > 0
                 ? session.targets[session.targetIndex - 1].pose : nil
             let settle = target.kind == .lens ? GazeDatasetPlan.lensSettleSeconds

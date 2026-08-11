@@ -10,6 +10,7 @@ struct GazeDatasetView: View {
     @State private var confirmingDelete = false
     @State private var datasetWindow: NSWindow?
     @State private var isFullScreen = false
+    @State private var recorded: (training: Int, validation: Int) = (0, 0)
 
     var body: some View {
         GeometryReader { geometry in
@@ -53,6 +54,10 @@ struct GazeDatasetView: View {
                 }
             }
         }
+        .onAppear { refreshRecordedCounts() }
+        .onChange(of: controller.datasetProgress?.status) { _, status in
+            if status == .finished { refreshRecordedCounts() }
+        }
         .onDisappear {
             if controller.datasetProgress?.status == .collecting {
                 controller.cancelGazeDataset()
@@ -95,6 +100,12 @@ struct GazeDatasetView: View {
                       systemImage: "lightbulb")
             }
             .font(.callout).foregroundStyle(.secondary)
+
+            Text(recorded.training + recorded.validation == 0
+                 ? "no schema-\(GazeDatasetSchema5.version) sessions recorded yet"
+                 : "schema-\(GazeDatasetSchema5.version) sessions so far: "
+                   + "\(recorded.training) training · \(recorded.validation) validation")
+                .font(.callout.monospaced()).foregroundStyle(.tertiary)
 
             if let error = controller.datasetError {
                 Text(error).font(.callout).foregroundStyle(.orange)
@@ -143,31 +154,107 @@ struct GazeDatasetView: View {
                 }
                 .foregroundStyle(.cyan)
                 .position(x: size.width / 2, y: 70)
+                .transition(.opacity)
             } else {
-                Circle()
-                    .fill(.cyan)
-                    .frame(width: 24, height: 24)
-                    .shadow(color: .cyan.opacity(0.45), radius: 8)
+                target_dot(accepted: snapshot.rejection == nil)
                     .position(x: target.xFraction * size.width,
                               y: target.yFraction * size.height)
-                    .animation(.easeInOut(duration: 0.18), value: target.id)
+                    .animation(.spring(response: 0.42, dampingFraction: 0.78), value: target.id)
             }
 
-            VStack(spacing: 8) {
-                Text(poseInstruction(target.pose)).font(.headline)
+            blockBanner(for: target.pose)
+                .position(x: size.width / 2, y: target.kind == .lens ? 150 : 62)
+
+            VStack(spacing: 10) {
+                Text(poseInstruction(target.pose))
+                    .font(.headline).multilineTextAlignment(.center)
+                    .frame(maxWidth: 520)
+
+                if let guidance = snapshot.guidance {
+                    GuidanceMeter(guidance: guidance)
+                }
+
                 Text(status(snapshot))
-                    .font(.callout).foregroundStyle(statusTint(snapshot))
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(statusTint(snapshot))
+                    .contentTransition(.opacity)
+                    .frame(height: 18)
+
+                sampleDots(filled: snapshot.samplesForTarget)
+
                 ProgressView(value: snapshot.progress)
-                    .progressViewStyle(.linear).frame(width: 360)
+                    .progressViewStyle(.linear).frame(width: 380)
                 Text("target \(min(snapshot.targetNumber + 1, snapshot.targetCount)) of "
                      + "\(snapshot.targetCount) · \(snapshot.totalSamples) samples")
                     .font(.caption.monospaced()).foregroundStyle(.secondary)
                 Button("Stop session") { controller.cancelGazeDataset() }
                     .font(.caption)
             }
-            .padding(.horizontal, 20).padding(.vertical, 14)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-            .position(x: size.width / 2, y: size.height - 88)
+            .padding(.horizontal, 24).padding(.vertical, 16)
+            .frame(width: 560)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            .position(x: size.width / 2, y: size.height - 118)
+            .animation(.easeInOut(duration: 0.2), value: snapshot.rejection)
+        }
+    }
+
+    /// the dot answers "am I being recorded right now?" without the participant looking away to
+    /// read the status line, which is the one thing they cannot do while fixating on it
+    private func target_dot(accepted: Bool) -> some View {
+        ZStack {
+            Circle()
+                .stroke(accepted ? Color.green.opacity(0.55) : Color.orange.opacity(0.5),
+                        lineWidth: 2)
+                .frame(width: 40, height: 40)
+            Circle()
+                .fill(accepted ? Color.green : Color.orange)
+                .frame(width: 22, height: 22)
+                .shadow(color: (accepted ? Color.green : Color.orange).opacity(0.5), radius: 9)
+        }
+        .animation(.easeInOut(duration: 0.22), value: accepted)
+    }
+
+    /// which of the pose blocks this is, so a nine-minute session has a visible shape
+    private func blockBanner(for pose: GazePosePrompt) -> some View {
+        let poses = GazePosePrompt.allCases
+        let index = poses.firstIndex(of: pose) ?? 0
+        return VStack(spacing: 7) {
+            Text("block \(index + 1) of \(poses.count) · \(poseName(pose))")
+                .font(.callout.weight(.semibold)).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                ForEach(poses.indices, id: \.self) { position in
+                    Capsule()
+                        .fill(position < index ? Color.cyan.opacity(0.55)
+                              : position == index ? Color.cyan : Color.white.opacity(0.18))
+                        .frame(width: position == index ? 26 : 16, height: 4)
+                }
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 9)
+        .background(.ultraThinMaterial, in: Capsule())
+        .animation(.easeInOut(duration: 0.3), value: index)
+    }
+
+    private func sampleDots(filled: Int) -> some View {
+        HStack(spacing: 5) {
+            ForEach(0..<GazeDatasetPlan.samplesPerTarget, id: \.self) { index in
+                Circle()
+                    .fill(index < filled ? Color.green : Color.white.opacity(0.22))
+                    .frame(width: 6, height: 6)
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: filled)
+    }
+
+    private func poseName(_ pose: GazePosePrompt) -> String {
+        switch pose {
+        case .neutral: return "neutral"
+        case .turnLeft: return "turn left"
+        case .turnRight: return "turn right"
+        case .lookUp: return "chin up"
+        case .lookDown: return "chin down"
+        case .tiltLeft: return "tilt left"
+        case .tiltRight: return "tilt right"
         }
     }
 
@@ -243,6 +330,84 @@ struct GazeDatasetView: View {
         guard let url = controller.gazeDatasetRootURL else { return false }
         return FileManager.default.fileExists(atPath: url.path)
     }
+
+    /// Counts finished sessions on the current schema only. A raw folder count would report the
+    /// legacy and cancelled sessions too, which is worse than no number: none of them can fill a
+    /// slot, so it would read as progress that does not exist. Only session metadata is opened,
+    /// never a manifest or an eye crop.
+    private func refreshRecordedCounts() {
+        guard let root = controller.gazeDatasetRootURL,
+              let names = try? FileManager.default.contentsOfDirectory(atPath: root.path) else {
+            recorded = (0, 0)
+            return
+        }
+        var training = 0
+        var validation = 0
+        for name in names {
+            let metadata = root.appendingPathComponent(name)
+                .appendingPathComponent("session.json")
+            guard let data = try? Data(contentsOf: metadata),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["schemaVersion"] as? Int == GazeDatasetSchema5.version,
+                  object["status"] as? String == "finished",
+                  let split = object["split"] as? String else { continue }
+            if split == GazeDatasetSplit.training.rawValue { training += 1 }
+            if split == GazeDatasetSplit.validation.rawValue { validation += 1 }
+        }
+        recorded = (training, validation)
+    }
+}
+
+/// Shows the distance to the accepting band rather than only naming the failure. The hardware
+/// check that confirmed the tilt direction also produced a 23 degree roll against a 6 degree
+/// request, so "not far enough" and "too far" need to be visibly different states, not one
+/// sentence the participant has to re-read.
+private struct GuidanceMeter: View {
+    let guidance: GazePosePromptGate.Guidance
+
+    private var span: Double { max((guidance.maximum ?? guidance.minimum * 2.5) * 1.35, 1) }
+    private var overshooting: Bool {
+        guard let maximum = guidance.maximum else { return false }
+        return guidance.absolute > maximum
+    }
+    private var reached: Bool { guidance.towardGoal >= guidance.minimum && !overshooting }
+
+    var body: some View {
+        VStack(spacing: 5) {
+            GeometryReader { geometry in
+                let width = geometry.size.width
+                let clamped = min(max(guidance.towardGoal, 0), span)
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.14))
+                    // the accepting band, drawn so the participant aims at a region not a number
+                    Capsule()
+                        .fill(Color.green.opacity(0.22))
+                        .frame(width: width * (bandEnd - bandStart))
+                        .offset(x: width * bandStart)
+                    Capsule()
+                        .fill(overshooting ? Color.orange : reached ? Color.green : Color.cyan)
+                        .frame(width: max(3, width * clamped / span))
+                }
+            }
+            .frame(width: 380, height: 8)
+
+            HStack {
+                Text(guidance.axis.rawValue)
+                Spacer()
+                Text(String(format: "%+.0f°", guidance.towardGoal))
+                    .foregroundStyle(overshooting ? .orange : reached ? .green : .secondary)
+                Spacer()
+                Text(guidance.maximum.map { String(format: "hold %.0f–%.0f°", guidance.minimum, $0) }
+                     ?? String(format: "at least %.0f°", guidance.minimum))
+            }
+            .font(.caption2.monospaced()).foregroundStyle(.secondary)
+            .frame(width: 380)
+        }
+        .animation(.easeOut(duration: 0.12), value: guidance.towardGoal)
+    }
+
+    private var bandStart: Double { min(guidance.minimum / span, 1) }
+    private var bandEnd: Double { min((guidance.maximum ?? span) / span, 1) }
 }
 
 private struct DatasetWindowReader: NSViewRepresentable {
