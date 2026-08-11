@@ -74,12 +74,13 @@ struct GazeDatasetView: View {
     private var setup: some View {
         // centred as a pair rather than stretched to the window: full screen is a very tall canvas
         // for a setup form, and pinning the actions to the bottom edge strands them
-        VStack(spacing: 28) {
-            HStack(alignment: .top, spacing: 36) {
-                setupDetails.frame(width: 520, alignment: .leading)
-                setupPreview.frame(width: 500, alignment: .leading)
+        HStack(alignment: .top, spacing: 36) {
+            setupDetails.frame(width: 520, alignment: .leading)
+            VStack(spacing: 28) {
+                setupPreview
+                setupActions
             }
-            setupActions.frame(width: 520 + 36 + 500, alignment: .center)
+            .frame(width: 500, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .padding(44)
@@ -145,9 +146,9 @@ struct GazeDatasetView: View {
         }
     }
 
-    /// spans both columns and centres under them, rather than sitting inside the left column,
-    /// since these actions apply to the whole screen (session count, start, data management) —
-    /// not to the description text beside them
+    /// sits directly under the camera preview, centred in that column, rather than inside the
+    /// left text column or spanning both — the actions are about the recording, so they belong
+    /// under the picture that shows what is being recorded
     private var setupActions: some View {
         VStack(spacing: 14) {
             Text(recorded.training + recorded.validation == 0
@@ -220,6 +221,11 @@ struct GazeDatasetView: View {
         }
     }
 
+    // fixed regardless of content: the advice line only appears in the failing case, and letting
+    // the panel grow and shrink as a participant's head moves was dragging the whole screen's
+    // layout — including the buttons below — up and down with it
+    private static let postureCheckHeight: CGFloat = 96
+
     /// live seating check, so an unreachable pose block is caught here rather than at block five
     @ViewBuilder
     private var postureCheck: some View {
@@ -245,7 +251,7 @@ struct GazeDatasetView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: Self.postureCheckHeight, alignment: .topLeading)
             .padding(.horizontal, 18).padding(.vertical, 12)
             .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
             .animation(.easeInOut(duration: 0.25), value: posture.isReady)
@@ -264,7 +270,7 @@ struct GazeDatasetView: View {
                         .buttonStyle(.bordered)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: Self.postureCheckHeight, alignment: .topLeading)
             .padding(.horizontal, 18).padding(.vertical, 12)
             .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
         }
