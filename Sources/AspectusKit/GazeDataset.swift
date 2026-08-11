@@ -22,12 +22,17 @@ public enum GazeDatasetSchema5 {
     ]
 }
 
+/// New prompts append, so pose block indices 0-4 keep the meaning every earlier schema recorded.
 public enum GazePosePrompt: String, Codable, Sendable, CaseIterable {
     case neutral
     case turnLeft
     case turnRight
     case lookUp
     case lookDown
+    /// tips the crown of the head toward the participant's own left shoulder
+    case tiltLeft
+    /// tips the crown of the head toward the participant's own right shoulder
+    case tiltRight
 }
 
 public enum GazeDatasetTargetKind: String, Codable, Sendable {
@@ -62,6 +67,11 @@ public enum GazeDatasetPlan {
     public static let settleSeconds = 1.0
     public static let lensSettleSeconds = 2.0
     public static let poseTransitionSettleSeconds = 1.5
+
+    /// screen grid plus the two lens targets that bracket every pose block
+    public static let targetsPerPose = gridSize * gridSize + 2
+    public static var targetCount: Int { GazePosePrompt.allCases.count * targetsPerPose }
+    public static var totalSamples: Int { targetCount * samplesPerTarget }
 
     private static let fractions = [0.10, 0.30, 0.50, 0.70, 0.90]
     private static let trainingOrder = [
@@ -348,28 +358,46 @@ public struct GazePosePromptGate: Sendable, Equatable {
     public struct Config: Sendable, Equatable {
         public var minimumHorizontalChangeDegrees: Double
         public var minimumVerticalChangeDegrees: Double
+        public var minimumRollChangeDegrees: Double
+        /// The trainer discards any sample beyond 20 degrees of absolute roll, and the unbounded
+        /// yaw and pitch gates have historically been overshot several times over. Bounding the
+        /// roll gate keeps the tilt blocks inside that filter instead of coaching past it.
+        public var maximumAbsoluteRollDegrees: Double
 
         public init(minimumHorizontalChangeDegrees: Double = 6,
-                    minimumVerticalChangeDegrees: Double = 5) {
+                    minimumVerticalChangeDegrees: Double = 5,
+                    minimumRollChangeDegrees: Double = 6,
+                    maximumAbsoluteRollDegrees: Double = 15) {
             self.minimumHorizontalChangeDegrees = minimumHorizontalChangeDegrees
             self.minimumVerticalChangeDegrees = minimumVerticalChangeDegrees
+            self.minimumRollChangeDegrees = minimumRollChangeDegrees
+            self.maximumAbsoluteRollDegrees = maximumAbsoluteRollDegrees
         }
     }
+
+    /// Vision reports positive roll as counterclockwise in the image. The participant's own left
+    /// shoulder is on the image's right, so tipping the crown toward it turns the face clockwise
+    /// in the image and reports negative roll. Fixed like the schema-4 pitch signs rather than
+    /// latched per session, so a session cannot silently record an inverted convention.
+    public static let tiltLeftRollSign = -1.0
 
     private var config: Config
     private var neutralYawTotal = 0.0
     private var neutralPitchTotal = 0.0
+    private var neutralRollTotal = 0.0
     private var neutralSamples = 0
     private var leftYawSign: Double?
 
     public init(config: Config = .init()) { self.config = config }
 
     public mutating func accepts(_ prompt: GazePosePrompt,
-                                 yawDegrees: Double, pitchDegrees: Double) -> Bool {
+                                 yawDegrees: Double, pitchDegrees: Double,
+                                 rollDegrees: Double) -> Bool {
         switch prompt {
         case .neutral:
             neutralYawTotal += yawDegrees
             neutralPitchTotal += pitchDegrees
+            neutralRollTotal += rollDegrees
             neutralSamples += 1
             return true
         case .turnLeft:
@@ -391,7 +419,20 @@ public struct GazePosePromptGate: Sendable, Equatable {
             guard let baseline = neutralPitch else { return false }
             let change = pitchDegrees - baseline
             return change >= config.minimumVerticalChangeDegrees
+        case .tiltLeft:
+            return accepts(rollDegrees: rollDegrees, sign: Self.tiltLeftRollSign)
+        case .tiltRight:
+            return accepts(rollDegrees: rollDegrees, sign: -Self.tiltLeftRollSign)
         }
+    }
+
+    /// requires the prompted direction and enough change, then keeps the sample inside the
+    /// trainer's absolute-roll filter rather than coaching the participant past it
+    private func accepts(rollDegrees: Double, sign: Double) -> Bool {
+        guard let baseline = neutralRoll else { return false }
+        let change = (rollDegrees - baseline) * sign
+        return change >= config.minimumRollChangeDegrees
+            && abs(rollDegrees) <= config.maximumAbsoluteRollDegrees
     }
 
     private var neutralYaw: Double? {
@@ -400,6 +441,10 @@ public struct GazePosePromptGate: Sendable, Equatable {
 
     private var neutralPitch: Double? {
         neutralSamples > 0 ? neutralPitchTotal / Double(neutralSamples) : nil
+    }
+
+    private var neutralRoll: Double? {
+        neutralSamples > 0 ? neutralRollTotal / Double(neutralSamples) : nil
     }
 }
 

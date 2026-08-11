@@ -57,9 +57,14 @@ per-eye pair `crop_side_px_l` and `crop_side_px_r`, so the manifest column set c
 collector now records **schema 5** with 42 columns. Schema 4 stays loadable under v1, so the
 recorded session remains readable immutable evidence, and the single-input-contract guard keeps
 v1 and v2 rows out of one run. Source frames are not retained, so that session cannot be
-re-rendered and is superseded rather than repairable. Roll normalization stays unvalidated under
-either version, because that session holds head roll to `1.68°` sd and the rotation it exercises
-is near-identity.
+re-rendered and is superseded rather than repairable.
+
+Roll normalization could not be validated at all under the five-pose plan, which held head roll to
+`1.68°` sd and left the canonical rotation near-identity. Schema 5 therefore adds the `tiltLeft`
+and `tiltRight` blocks — seven pose blocks, 189 targets and 1,134 rows, roughly a 40% longer
+session. The collector requires at least `6°` of roll change from the participant's own neutral
+baseline in the declared direction, and additionally refuses beyond `15°` of absolute roll so the
+blocks stay inside the trainer's `20°` roll filter instead of being coached past it.
 
 Reports from schema-5 sessions add a `crop_side_ratio` diagnostic — the per-sample ratio of the
 shorter to the longer crop side. It is identically `1.0` for v1 by construction; under v2 it
@@ -79,7 +84,10 @@ Before training, numeric target pitch must reproduce the physical setup, screen 
 negative and decrease down the display, and vertical head-pose changes must be verified without
 treating prompt names as numeric evidence. Apple Vision defines positive pitch as head-down, so the
 schema-4 collector requires `lookUp − neutral ≤ -5°` and `lookDown − neutral ≥ 5°`. Eligible
-sessions must agree on that numeric convention.
+sessions must agree on that numeric convention. Vision likewise defines positive roll as
+counterclockwise in the image, and the participant's own left shoulder is on the image's right, so
+schema 5 requires `tiltLeft − neutral ≤ -6°` and `tiltRight − neutral ≥ 6°`. Both directions are
+fixed declared signs rather than per-session latches.
 
 That gate currently fails on the consumed development evidence. Both eligible sessions contain
 adequate opposite vertical motion, but their numeric `lookUp − neutral` signs disagree. A
@@ -175,8 +183,11 @@ The trainer:
 
 - accepts only sessions marked `finished` and requires every role explicitly on the command line
 - never creates a row-level random split
-- validates the 810-row target plan and every eye image
-- validates schema-4 session contracts and recomputes alignment and clipping evidence from raw axes
+- validates the schema's target plan and every eye image: 810 rows over five pose blocks for
+  schemas 1-4, and 1,134 rows over seven for schema 5
+- validates canonical session contracts and recomputes alignment and clipping evidence from raw axes
+- checks the schema-5 roll blocks against the declared Vision tilt direction, so an inverted
+  session fails loudly rather than passing as unusable evidence
 - reconstructs target coordinates and angles from stored display geometry
 - stops before training when numeric target pitch or head-pitch orientation is inconsistent
 - keeps training and development sessions disjoint

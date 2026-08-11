@@ -48,6 +48,7 @@ MINIMUM_VALIDATION_LENS_SAMPLES_PER_POSE = 6
 MINIMUM_VALIDATION_LENS_TARGETS_PER_POSE = 2
 MINIMUM_VALIDATION_HORIZONTAL_POSE_SEPARATION_DEGREES = 6.0
 MINIMUM_VALIDATION_VERTICAL_POSE_SEPARATION_DEGREES = 5.0
+MINIMUM_VALIDATION_ROLL_POSE_SEPARATION_DEGREES = 6.0
 CANONICAL_MAXIMUM_MEDIAN_DEGREES = 2.0
 CANONICAL_MAXIMUM_P95_DEGREES = 5.0
 CANONICAL_MAXIMUM_LENS_P95_DEGREES = 3.0
@@ -169,7 +170,27 @@ CANONICAL_ALLOWED_PUPIL_SOURCES = frozenset({
 
 def canonical_schema(version: int) -> bool:
     return version in CANONICAL_SCHEMA_CROP_VERSIONS
-POSE_PROMPTS = ("neutral", "turnLeft", "turnRight", "lookUp", "lookDown")
+BASE_POSE_PROMPTS = ("neutral", "turnLeft", "turnRight", "lookUp", "lookDown")
+# schema 5 appends the roll blocks, so pose indices 0-4 keep their earlier meaning
+ROLL_POSE_PROMPTS = ("tiltLeft", "tiltRight")
+SCHEMA_POSE_PROMPTS = {
+    1: BASE_POSE_PROMPTS,
+    2: BASE_POSE_PROMPTS,
+    3: BASE_POSE_PROMPTS,
+    4: BASE_POSE_PROMPTS,
+    5: BASE_POSE_PROMPTS + ROLL_POSE_PROMPTS,
+}
+POSE_PROMPTS = BASE_POSE_PROMPTS
+# tiltLeft tips the crown toward the participant's own left shoulder. That shoulder is on the
+# image's right, so the face turns clockwise in the image and Vision reports negative roll.
+TILT_LEFT_ROLL_SIGN = -1.0
+
+
+def pose_prompts(schema_version: int) -> tuple[str, ...]:
+    try:
+        return SCHEMA_POSE_PROMPTS[schema_version]
+    except KeyError as error:
+        raise ValueError(f"unsupported gaze dataset schema: {schema_version}") from error
 TARGETS_PER_POSE = 27
 GRID_FRACTIONS = (0.10, 0.30, 0.50, 0.70, 0.90)
 TRAINING_GRID_ORDER = (
@@ -955,14 +976,15 @@ def validated_session_setup(
 
 
 def expected_target_label(
-    split: str, target_id: int, geometry: dict[str, float]
+    split: str, target_id: int, geometry: dict[str, float],
+    prompts: tuple[str, ...] = BASE_POSE_PROMPTS,
 ) -> tuple[str, float, float, float, float, str]:
     if split not in {"training", "validation"}:
         raise ValueError("session split is invalid")
-    if not 0 <= target_id < len(POSE_PROMPTS) * TARGETS_PER_POSE:
+    if not 0 <= target_id < len(prompts) * TARGETS_PER_POSE:
         raise ValueError("target id is invalid")
     pose_index, position = divmod(target_id, TARGETS_PER_POSE)
-    pose_prompt = POSE_PROMPTS[pose_index]
+    pose_prompt = prompts[pose_index]
     if position in {0, TARGETS_PER_POSE - 1}:
         return "lens", 0.5, 0.0, 0.0, 0.0, pose_prompt
     order = list(TRAINING_GRID_ORDER)
@@ -1021,8 +1043,7 @@ def load_samples(
         session_id = str(metadata["sessionID"])
         stored_split = str(metadata["split"])
         schema_version = int(metadata["schemaVersion"])
-        if schema_version not in {1, 2, 3, 4, 5}:
-            raise ValueError(f"unsupported gaze dataset schema: {schema_version}")
+        session_prompts = pose_prompts(schema_version)
         (
             geometry,
             setup_binding,
@@ -1064,7 +1085,8 @@ def load_samples(
         expected = int(metadata["capturedSamples"])
         samples_per_target = int(metadata["samplesPerTarget"])
         target_count = int(metadata["targetCount"])
-        if samples_per_target != 6 or target_count != len(POSE_PROMPTS) * TARGETS_PER_POSE:
+        if samples_per_target != 6 \
+                or target_count != len(session_prompts) * TARGETS_PER_POSE:
             raise ValueError(f"unsupported collection plan in {session_id}")
         if expected != samples_per_target * target_count:
             raise ValueError(f"{session_id} is not a complete collection")
@@ -1119,7 +1141,9 @@ def load_samples(
             target_pitch = finite_float(row, "target_pitch_deg")
             target_x = finite_float(row, "target_x")
             target_y = finite_float(row, "target_y")
-            expected = expected_target_label(stored_split, target_id, geometry)
+            expected = expected_target_label(
+                stored_split, target_id, geometry, session_prompts
+            )
             expected_kind, expected_x, expected_y, expected_yaw, expected_pitch, expected_pose = (
                 expected
             )
@@ -1193,8 +1217,29 @@ def load_samples(
     return samples, participants, loaded_session_ids
 
 
+def session_pose_prompts(
+    samples: list[Sample], session_id: str
+) -> tuple[str, ...]:
+    versions = {
+        sample.schema_version for sample in samples if sample.session_id == session_id
+    }
+    if len(versions) > 1:
+        raise ValueError("session does not declare one schema version")
+    if not versions:
+        # a fully filtered session has no rows left to read a schema from; the coverage and
+        # filtered-away checks below are what should report it
+        return BASE_POSE_PROMPTS
+    # the loader validates the schema itself; here only the block count matters, and every
+    # schema that does not declare the roll blocks lays out the base five
+    return SCHEMA_POSE_PROMPTS.get(next(iter(versions)), BASE_POSE_PROMPTS)
+
+
 def validate_pose_coverage(samples: list[Sample], expected_sessions: Iterable[str]) -> None:
     expected_sessions = list(expected_sessions)
+    session_prompts = {
+        session_id: session_pose_prompts(samples, session_id)
+        for session_id in expected_sessions
+    }
     counts: dict[tuple[str, int], int] = {}
     lens_counts: dict[tuple[str, int], int] = {}
     lens_targets: dict[tuple[str, int], set[int]] = {}
@@ -1207,7 +1252,7 @@ def validate_pose_coverage(samples: list[Sample], expected_sessions: Iterable[st
             lens_targets.setdefault(key, set()).add(sample.target_id % TARGETS_PER_POSE)
     incomplete = {
         session_id: [
-            pose_index for pose_index in range(5)
+            pose_index for pose_index in range(len(session_prompts[session_id]))
             if counts.get((session_id, pose_index), 0) < MINIMUM_VALIDATION_SAMPLES_PER_POSE
         ]
         for session_id in expected_sessions
@@ -1217,7 +1262,7 @@ def validate_pose_coverage(samples: list[Sample], expected_sessions: Iterable[st
         raise ValueError(f"validation pose coverage is incomplete after filtering: {incomplete}")
     insufficient_lens = {
         session_id: [
-            pose_index for pose_index in range(len(POSE_PROMPTS))
+            pose_index for pose_index in range(len(session_prompts[session_id]))
             if lens_counts.get((session_id, pose_index), 0)
             < MINIMUM_VALIDATION_LENS_SAMPLES_PER_POSE
             or len(lens_targets.get((session_id, pose_index), set()))
@@ -1231,7 +1276,7 @@ def validate_pose_coverage(samples: list[Sample], expected_sessions: Iterable[st
     lens_totals = {
         session_id: sum(
             lens_counts.get((session_id, pose_index), 0)
-            for pose_index in range(len(POSE_PROMPTS))
+            for pose_index in range(len(session_prompts[session_id]))
         )
         for session_id in expected_sessions
     }
@@ -1251,7 +1296,7 @@ def validate_pose_coverage(samples: list[Sample], expected_sessions: Iterable[st
                 if sample.session_id == session_id
                 and sample.target_id // TARGETS_PER_POSE == pose_index
             ]
-            for pose_index in range(len(POSE_PROMPTS))
+            for pose_index in range(len(session_prompts[session_id]))
         ]
         neutral_yaw = statistics.fmean(sample.head_pose[0] for sample in pose_samples[0])
         neutral_pitch = statistics.fmean(sample.head_pose[1] for sample in pose_samples[0])
@@ -1276,6 +1321,26 @@ def validate_pose_coverage(samples: list[Sample], expected_sessions: Iterable[st
             raise ValueError(
                 "validation head-pose coverage does not separate the prompted poses"
             )
+        # roll blocks are checked against the declared Vision sign rather than a per-session
+        # latch, so a session that recorded the inverted convention fails here instead of
+        # becoming silently unusable evidence
+        if len(session_prompts[session_id]) > len(BASE_POSE_PROMPTS):
+            neutral_roll = statistics.fmean(
+                sample.head_pose[2] for sample in pose_samples[0]
+            )
+            tilt_left_change = statistics.fmean(
+                sample.head_pose[2] for sample in pose_samples[5]
+            ) - neutral_roll
+            tilt_right_change = statistics.fmean(
+                sample.head_pose[2] for sample in pose_samples[6]
+            ) - neutral_roll
+            if tilt_left_change * TILT_LEFT_ROLL_SIGN \
+                    < MINIMUM_VALIDATION_ROLL_POSE_SEPARATION_DEGREES \
+                    or tilt_right_change * -TILT_LEFT_ROLL_SIGN \
+                    < MINIMUM_VALIDATION_ROLL_POSE_SEPARATION_DEGREES:
+                raise ValueError(
+                    "validation head-pose coverage does not separate the prompted roll poses"
+                )
 
 
 def validate_numeric_pitch_contract(

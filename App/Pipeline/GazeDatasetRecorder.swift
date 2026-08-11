@@ -254,7 +254,8 @@ final class GazeDatasetRecorder: @unchecked Sendable {
             let poseAccepted = session.posePromptGate.accepts(
                 target.pose,
                 yawDegrees: tracking.headPose.yaw * degrees,
-                pitchDegrees: tracking.headPose.pitch * degrees)
+                pitchDegrees: tracking.headPose.pitch * degrees,
+                rollDegrees: tracking.headPose.roll * degrees)
             let previousPose = session.targetIndex > 0
                 ? session.targets[session.targetIndex - 1].pose : nil
             let settle = target.kind == .lens ? GazeDatasetPlan.lensSettleSeconds

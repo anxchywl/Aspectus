@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import train_gaze
 from train_gaze import (
+    BASE_POSE_PROMPTS,
     CANDIDATE_MANIFEST_FILENAME,
     CANONICAL_CROP_CONTRACT_V1,
     CANONICAL_CROP_CONTRACT_V2,
@@ -49,6 +50,7 @@ from train_gaze import (
     augmentation_config,
     build_candidate_manifest,
     canonical_columns,
+    pose_prompts,
     canonical_schema,
     claim_final_evaluation_session,
     epoch_evaluation,
@@ -108,7 +110,16 @@ TEST_VALIDATION_HEAD_POSES = (
     (-8.0, 0.0, 0.0),
     (0.0, -6.0, 0.0),
     (0.0, 6.0, 0.0),
+    # tiltLeft takes the declared negative roll sign, tiltRight the positive one
+    (0.0, 0.0, -8.0),
+    (0.0, 0.0, 8.0),
 )
+
+
+def plan_size(schema_version: int) -> tuple[int, int]:
+    """target count and total samples for a schema's pose plan"""
+    targets = len(pose_prompts(schema_version)) * TARGETS_PER_POSE
+    return targets, targets * 6
 
 
 def metadata(schema_version: int, split: str = "training") -> dict:
@@ -118,9 +129,9 @@ def metadata(schema_version: int, split: str = "training") -> dict:
         "sessionID": "session",
         "split": split,
         "status": "finished",
-        "capturedSamples": 810,
+        "capturedSamples": plan_size(schema_version)[1],
         "samplesPerTarget": 6,
-        "targetCount": 135,
+        "targetCount": plan_size(schema_version)[0],
         "displayGeometry": TEST_DISPLAY_GEOMETRY,
         "eyeImageWidth": 60,
         "eyeImageHeight": 60,
@@ -143,7 +154,7 @@ def manifest_row(columns: list[str], sample_number: int,
                  schema_version: int, split: str = "training") -> dict[str, str]:
     target_id = (sample_number - 1) // 6
     kind, target_x, target_y, target_yaw, target_pitch, pose = expected_target_label(
-        split, target_id, TEST_DISPLAY_GEOMETRY
+        split, target_id, TEST_DISPLAY_GEOMETRY, pose_prompts(schema_version)
     )
     row = {column: "0" for column in columns}
     row.update({
@@ -221,7 +232,7 @@ def write_complete_session(root: Path, schema_version: int, split: str = "traini
     with (session / "manifest.csv").open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
-        for sample_number in range(1, 811):
+        for sample_number in range(1, plan_size(schema_version)[1] + 1):
             row = manifest_row(columns, sample_number, schema_version, split)
             if row_mutator is not None:
                 row_mutator(row, sample_number)
@@ -457,7 +468,7 @@ class DatasetLoadingTests(unittest.TestCase):
 
                     samples, _, _ = load_samples(root, "training")
 
-                    self.assertEqual(len(samples), 810)
+                    self.assertEqual(len(samples), plan_size(schema_version)[1])
                     self.assertEqual(samples[0].input_contract, expected_contract)
                     self.assertEqual(
                         samples[0].label_contract_sha256, label_contract_digest()
@@ -753,6 +764,61 @@ class DatasetLoadingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "does not separate"):
             validate_pose_coverage(samples, ["session"])
+
+    def _roll_coverage_samples(self, roll_by_pose: dict[int, float]) -> list[Sample]:
+        samples = []
+        for pose in range(len(pose_prompts(5))):
+            head_pose = TEST_VALIDATION_HEAD_POSES[pose]
+            if pose in roll_by_pose:
+                head_pose = (head_pose[0], head_pose[1], roll_by_pose[pose])
+            for target_position, count, kind in (
+                (0, 6, "lens"), (26, 6, "lens"), (1, 88, "screen")
+            ):
+                samples.extend(
+                    Sample(
+                        session_id="session", split="validation",
+                        target_id=pose * TARGETS_PER_POSE + target_position,
+                        target_kind=kind, left_path=Path("left.png"),
+                        right_path=Path("right.png"), head_pose=head_pose,
+                        gaze_degrees=(0, 0), schema_version=5,
+                    )
+                    for _ in range(count)
+                )
+        return samples
+
+    def test_roll_blocks_must_separate_in_the_declared_vision_direction(self):
+        validate_pose_coverage(self._roll_coverage_samples({}), ["session"])
+
+    def test_roll_coverage_rejects_an_inverted_or_flat_tilt_session(self):
+        # an inverted session records faithful Vision values while the prompted physical motion is
+        # reversed, which is the failure that cost a pitch-gated session under the old latch
+        inverted = self._roll_coverage_samples({5: 8.0, 6: -8.0})
+        with self.assertRaisesRegex(ValueError, "does not separate the prompted roll poses"):
+            validate_pose_coverage(inverted, ["session"])
+
+        flat = self._roll_coverage_samples({5: -2.0, 6: 2.0})
+        with self.assertRaisesRegex(ValueError, "does not separate the prompted roll poses"):
+            validate_pose_coverage(flat, ["session"])
+
+    def test_roll_coverage_is_not_required_of_schemas_without_tilt_blocks(self):
+        samples = []
+        for pose in range(len(BASE_POSE_PROMPTS)):
+            for target_position, count, kind in (
+                (0, 6, "lens"), (26, 6, "lens"), (1, 88, "screen")
+            ):
+                samples.extend(
+                    Sample(
+                        session_id="session", split="validation",
+                        target_id=pose * TARGETS_PER_POSE + target_position,
+                        target_kind=kind, left_path=Path("left.png"),
+                        right_path=Path("right.png"),
+                        head_pose=TEST_VALIDATION_HEAD_POSES[pose],
+                        gaze_degrees=(0, 0), schema_version=4,
+                    )
+                    for _ in range(count)
+                )
+
+        validate_pose_coverage(samples, ["session"])
 
     def test_numeric_pitch_contract_rejects_one_inverted_session(self):
         samples = numeric_pitch_samples("first", Path("eye.png"))

@@ -15,7 +15,8 @@ final class GazeDatasetPlanTests: XCTestCase {
 
     func testPlanCoversEveryGridPointAndLensForEveryPose() {
         let targets = GazeDatasetPlan.targets(for: .training)
-        XCTAssertEqual(targets.count, 5 * 27)
+        XCTAssertEqual(GazePosePrompt.allCases.count, 7)
+        XCTAssertEqual(targets.count, 7 * 27)
 
         for pose in GazePosePrompt.allCases {
             let block = targets.filter { $0.pose == pose }
@@ -273,27 +274,62 @@ final class GazeDatasetCanonicalAlignmentTests: XCTestCase {
 final class GazePosePromptGateTests: XCTestCase {
     func testHorizontalPromptsRequireRealOppositeMotion() {
         var gate = GazePosePromptGate()
-        XCTAssertTrue(gate.accepts(.neutral, yawDegrees: 2, pitchDegrees: 8))
-        XCTAssertFalse(gate.accepts(.turnLeft, yawDegrees: 5, pitchDegrees: 8))
-        XCTAssertTrue(gate.accepts(.turnLeft, yawDegrees: -5, pitchDegrees: 8))
-        XCTAssertFalse(gate.accepts(.turnRight, yawDegrees: -6, pitchDegrees: 8))
-        XCTAssertTrue(gate.accepts(.turnRight, yawDegrees: 9, pitchDegrees: 8))
+        XCTAssertTrue(gate.accepts(.neutral, yawDegrees: 2, pitchDegrees: 8, rollDegrees: 0))
+        XCTAssertFalse(gate.accepts(.turnLeft, yawDegrees: 5, pitchDegrees: 8, rollDegrees: 0))
+        XCTAssertTrue(gate.accepts(.turnLeft, yawDegrees: -5, pitchDegrees: 8, rollDegrees: 0))
+        XCTAssertFalse(gate.accepts(.turnRight, yawDegrees: -6, pitchDegrees: 8, rollDegrees: 0))
+        XCTAssertTrue(gate.accepts(.turnRight, yawDegrees: 9, pitchDegrees: 8, rollDegrees: 0))
     }
 
     func testVerticalPromptsRequireRealOppositeMotion() {
         var gate = GazePosePromptGate()
-        XCTAssertTrue(gate.accepts(.neutral, yawDegrees: 0, pitchDegrees: 10))
-        XCTAssertFalse(gate.accepts(.lookUp, yawDegrees: 0, pitchDegrees: 13))
-        XCTAssertTrue(gate.accepts(.lookUp, yawDegrees: 0, pitchDegrees: 4))
-        XCTAssertFalse(gate.accepts(.lookDown, yawDegrees: 0, pitchDegrees: 2))
-        XCTAssertTrue(gate.accepts(.lookDown, yawDegrees: 0, pitchDegrees: 17))
+        XCTAssertTrue(gate.accepts(.neutral, yawDegrees: 0, pitchDegrees: 10, rollDegrees: 0))
+        XCTAssertFalse(gate.accepts(.lookUp, yawDegrees: 0, pitchDegrees: 13, rollDegrees: 0))
+        XCTAssertTrue(gate.accepts(.lookUp, yawDegrees: 0, pitchDegrees: 4, rollDegrees: 0))
+        XCTAssertFalse(gate.accepts(.lookDown, yawDegrees: 0, pitchDegrees: 2, rollDegrees: 0))
+        XCTAssertTrue(gate.accepts(.lookDown, yawDegrees: 0, pitchDegrees: 17, rollDegrees: 0))
     }
 
     func testVerticalPromptSignCannotFlipBetweenSessions() {
         var gate = GazePosePromptGate()
-        XCTAssertTrue(gate.accepts(.neutral, yawDegrees: 0, pitchDegrees: 0))
-        XCTAssertFalse(gate.accepts(.lookUp, yawDegrees: 0, pitchDegrees: 6))
-        XCTAssertFalse(gate.accepts(.lookDown, yawDegrees: 0, pitchDegrees: -6))
+        XCTAssertTrue(gate.accepts(.neutral, yawDegrees: 0, pitchDegrees: 0, rollDegrees: 0))
+        XCTAssertFalse(gate.accepts(.lookUp, yawDegrees: 0, pitchDegrees: 6, rollDegrees: 0))
+        XCTAssertFalse(gate.accepts(.lookDown, yawDegrees: 0, pitchDegrees: -6, rollDegrees: 0))
+    }
+
+    func testTiltPromptsRequireRealOppositeRoll() {
+        var gate = GazePosePromptGate()
+        XCTAssertTrue(gate.accepts(.neutral, yawDegrees: 0, pitchDegrees: 0, rollDegrees: 1))
+        // tiltLeft takes negative Vision roll, and 5 degrees of change is short of the 6 required
+        XCTAssertFalse(gate.accepts(.tiltLeft, yawDegrees: 0, pitchDegrees: 0, rollDegrees: -4))
+        XCTAssertTrue(gate.accepts(.tiltLeft, yawDegrees: 0, pitchDegrees: 0, rollDegrees: -8))
+        XCTAssertFalse(gate.accepts(.tiltRight, yawDegrees: 0, pitchDegrees: 0, rollDegrees: 6))
+        XCTAssertTrue(gate.accepts(.tiltRight, yawDegrees: 0, pitchDegrees: 0, rollDegrees: 9))
+    }
+
+    func testTiltPromptSignIsFixedRatherThanLatchedPerSession() {
+        var gate = GazePosePromptGate()
+        XCTAssertTrue(gate.accepts(.neutral, yawDegrees: 0, pitchDegrees: 0, rollDegrees: 0))
+        // an inverted participant cannot latch the opposite convention the way pitch once could
+        XCTAssertFalse(gate.accepts(.tiltLeft, yawDegrees: 0, pitchDegrees: 0, rollDegrees: 8))
+        XCTAssertFalse(gate.accepts(.tiltRight, yawDegrees: 0, pitchDegrees: 0, rollDegrees: -8))
+    }
+
+    func testTiltPromptsStayInsideTheTrainerAbsoluteRollFilter() {
+        var gate = GazePosePromptGate()
+        XCTAssertTrue(gate.accepts(.neutral, yawDegrees: 0, pitchDegrees: 0, rollDegrees: 0))
+        // correct direction and far past the minimum, but beyond the bound the trainer would
+        // discard, so the gate keeps coaching instead of banking an unusable sample
+        XCTAssertFalse(gate.accepts(.tiltLeft, yawDegrees: 0, pitchDegrees: 0, rollDegrees: -16))
+        XCTAssertTrue(gate.accepts(.tiltLeft, yawDegrees: 0, pitchDegrees: 0, rollDegrees: -15))
+    }
+
+    func testTiltPromptsAreRelativeToTheNeutralRollBaseline() {
+        var gate = GazePosePromptGate()
+        // a participant who sits with a persistent head tilt still has to move by the full amount
+        XCTAssertTrue(gate.accepts(.neutral, yawDegrees: 0, pitchDegrees: 0, rollDegrees: -5))
+        XCTAssertFalse(gate.accepts(.tiltLeft, yawDegrees: 0, pitchDegrees: 0, rollDegrees: -9))
+        XCTAssertTrue(gate.accepts(.tiltLeft, yawDegrees: 0, pitchDegrees: 0, rollDegrees: -12))
     }
 }
 

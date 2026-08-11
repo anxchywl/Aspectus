@@ -375,16 +375,24 @@ Source frames are not retained, so the recorded schema-4 session cannot be re-re
 it is superseded rather than repairable, which is why the contract had to be settled before any
 further collection rather than after.
 
-Two collection-plan questions remain open under v2. Roll normalization is still unvalidated: the
-recorded session holds head roll to 1.68° sd over an 11.4° range, so the canonical rotation it
-exercises is near-identity and reduces per-eye orientation spread by only 2–10%. Any collection
-intended to exercise roll must deliberately include roll variation, which the current five-pose
-plan does not produce. Separately, inter-eye axis disagreement is pose-structured and largest where
-the lid collapses the contour — median 2.9°/3.3° in the turned blocks against 13.6°/16.7° in
-lookDown/lookUp — and since the shared rotation is a circular mean of both axes, the vertical
-blocks are rotated using the least reliable contours in the session. Disagreement is already
-recorded and is a usable reliability gate; eye openness is not a substitute for it (r = +0.04,
-against r = +0.75 for `|head pitch|`).
+Roll normalization was unvalidated because the recorded session holds head roll to 1.68° sd over an
+11.4° range, so the canonical rotation it exercises is near-identity and reduces per-eye
+orientation spread by only 2–10%. The five-pose plan produced no roll to normalize, so schema 5
+adds `tiltLeft` and `tiltRight` blocks: 7 pose blocks, 189 targets and 1,134 samples, roughly a
+40% longer session. The gate requires at least 6° of roll change from the participant's own neutral
+baseline in the direction the Vision convention declares, and unlike the yaw and pitch gates it
+also refuses beyond 15° of absolute roll, because the trainer discards any sample past 20° and the
+unbounded gates have historically been overshot several times over. The direction is a fixed
+declared sign rather than a per-session latch, and the loader re-checks the recorded tilt blocks
+against it, so a session that records the inverted convention fails validation loudly instead of
+becoming silently unusable evidence the way the pitch session did.
+
+The remaining collection-plan question is contour reliability. Inter-eye axis disagreement is
+pose-structured and largest where the lid collapses the contour — median 2.9°/3.3° in the turned
+blocks against 13.6°/16.7° in lookDown/lookUp — and since the shared rotation is a circular mean of
+both axes, the vertical blocks are rotated using the least reliable contours in the session.
+Disagreement is already recorded and is a usable reliability gate; eye openness is not a substitute
+for it (r = +0.04, against r = +0.75 for `|head pitch|`). No such gate is implemented yet.
 
 If the pitch contract is resolved, any compact comparison must be predeclared, use only cleared
 first-party data and random initialization, preserve the fixed session roles and exact gates, and

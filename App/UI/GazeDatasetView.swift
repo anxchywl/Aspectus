@@ -84,7 +84,8 @@ struct GazeDatasetView: View {
             .pickerStyle(.segmented).frame(width: 340)
 
             VStack(alignment: .leading, spacing: 8) {
-                Label("about 810 labelled samples in four minutes", systemImage: "clock")
+                Label("\(GazeDatasetPlan.totalSamples) labelled samples in six to nine minutes",
+                      systemImage: "clock")
                 Label("aligned eye crops, head pose, gaze labels and crop-quality metadata; no full-face images",
                       systemImage: "crop")
                 Label("stored only in your private Application Support folder",
@@ -191,13 +192,21 @@ struct GazeDatasetView: View {
         .padding(40)
     }
 
+    // "tilt" is reserved for the roll prompts, so the pitch prompts name the chin instead: a
+    // participant who confuses the two axes records a physically inverted block
     private func poseInstruction(_ pose: GazePosePrompt) -> String {
         switch pose {
         case .neutral: return "face the camera straight; move only your eyes"
         case .turnLeft: return "turn your head slightly left; keep it there and move only your eyes"
         case .turnRight: return "turn your head slightly right; keep it there and move only your eyes"
-        case .lookUp: return "tilt your head slightly up; keep it there and move only your eyes"
-        case .lookDown: return "tilt your head slightly down; keep it there and move only your eyes"
+        case .lookUp: return "raise your chin slightly; keep it there and move only your eyes"
+        case .lookDown: return "lower your chin slightly; keep it there and move only your eyes"
+        case .tiltLeft:
+            return "tilt your head so your left ear moves toward your left shoulder; "
+                + "keep facing the camera and move only your eyes"
+        case .tiltRight:
+            return "tilt your head so your right ear moves toward your right shoulder; "
+                + "keep facing the camera and move only your eyes"
         }
     }
 
