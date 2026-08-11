@@ -92,12 +92,11 @@ struct GazeDatasetView: View {
     private static let trainingSlots = 4
     private static let validationSlots = 2
 
-    // fixed so this column's height never depends on the error label or on wrapped-text
-    // reflow, and the footer below it — session count, buttons — stays put
-    private static let setupDetailsHeight: CGFloat = 470
-    // fixed for the same reason: the advice line only appears in the failing posture state, and
-    // letting the panel grow or shrink as a participant's head moves dragged the footer with it
-    private static let postureCheckHeight: CGFloat = 96
+    // fixed so the panel does not grow or shrink as a participant's head moves and the advice
+    // line appears or disappears — sized for the three-line failing state, with the shorter
+    // passing state vertically centred inside it rather than left pinned to the top, so the
+    // slack reads as breathing room instead of a stray empty gap
+    private static let postureCheckHeight: CGFloat = 100
 
     private var nextSplit: GazeDatasetSplit {
         recorded.training < Self.trainingSlots ? .training : .validation
@@ -151,7 +150,6 @@ struct GazeDatasetView: View {
                 .labelStyle(.aligned)
                 .opacity(controller.datasetError == nil ? 0 : 1)
         }
-        .frame(height: Self.setupDetailsHeight, alignment: .top)
     }
 
     /// spans both columns and centres under them, rather than sitting inside the left column,
@@ -254,7 +252,7 @@ struct GazeDatasetView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: Self.postureCheckHeight, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: Self.postureCheckHeight, alignment: .leading)
             .padding(.horizontal, 18).padding(.vertical, 12)
             .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
             .animation(.easeInOut(duration: 0.25), value: posture.isReady)
@@ -273,7 +271,7 @@ struct GazeDatasetView: View {
                         .buttonStyle(.bordered)
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: Self.postureCheckHeight, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: Self.postureCheckHeight, alignment: .leading)
             .padding(.horizontal, 18).padding(.vertical, 12)
             .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
         }
