@@ -24,14 +24,63 @@ evidence, deterministic checkpoint selection and bounded one-factor tests produc
 Each value is the worst normalized gate across both development sessions; results are never pooled
 to hide a failing session. Every candidate seed had to pass and improve over its paired baseline.
 No procedure is frozen, another final recording is not justified, and no model is ready for native
-integration. The recommended next step is an approval-gated input/model redesign: record clipping
-and occlusion quality, add canonical paired-eye alignment, verify numeric pitch labels, and test an
-independently implemented compact paired-eye/head-pose model using only explicitly cleared
-first-party data. See [docs/DESIGN.md](../docs/DESIGN.md).
+integration. The tracked input/model redesign is now adopted as a foundation, but its pre-training
+label gate rejects the current evidence before any new model run. See
+[docs/DESIGN.md](../docs/DESIGN.md).
 
 Preserve the local v19–v31 artifacts as consumed-development evidence, but never freeze or evaluate
 them as a final candidate: they predate checkpoint format 3. A future candidate must be retrained
 under the current provenance and lens-coverage contract.
+
+### Schema 4 input contract and current stop
+
+Schema 4 records two canonical paired-eye crops directly from each source frame. Each eye axis is
+the farthest contour-point pair measured in source pixels and ordered by image x. Both eyes use the
+circular mean of their axes as one rotation and `1.8 ×` the larger axis length as one square scale;
+each crop remains centred on its own axis midpoint and is sampled to `60 × 60` through the same
+explicit edge-clamped affine contract.
+
+Session metadata binds source dimensions, crop sampling, the physical-lens angular labels and the
+Apple Vision revision-3 head-pose convention. Per-sample evidence includes contour and pupil counts
+and source, raw eye-axis endpoints, paired rotation, axis disagreement, crop side and geometric
+clipped fractions. These make alignment, clipping and occlusion-related evidence inspectable; they
+do not claim a validated occlusion score or establish clipping, disagreement or occlusion filters.
+
+Schemas 1–3 retain only their already-resampled crops. They lack source axes and requested crop
+geometry, so they cannot be recropped or treated as a paired raw-versus-schema-4 alignment test.
+Applying another transform to those PNGs would create a different lossy input contract.
+
+Before training, numeric target pitch must reproduce the physical setup, screen pitch must be
+negative and decrease down the display, and vertical head-pose changes must be verified without
+treating prompt names as numeric evidence. Apple Vision defines positive pitch as head-down, so the
+schema-4 collector requires `lookUp − neutral ≤ -5°` and `lookDown − neutral ≥ 5°`. Eligible
+sessions must agree on that numeric convention.
+
+That gate currently fails on the consumed development evidence. Both eligible sessions contain
+adequate opposite vertical motion, but their numeric `lookUp − neutral` signs disagree. A
+2026-08-11 read-only provenance investigation classified the disagreement: the recorded numbers
+follow the Vision head-down-positive convention in every session — the SDK header, the unchanged
+producer code at every historical commit, and the inverted session's convention-consistent
+neutral pitch and yaw prompt signs all confirm it — but one session's prompted vertical motion
+was genuinely inverted, coached by the retired per-session sign-learning gate. Historical rows
+are not flipped or relabelled; that session is simply not eligible pitch-gated development
+evidence. With one eligible development session the two-session comparison contract cannot be
+satisfied, so no compact-model comparison was launched and no native integration is justified.
+New eligible evidence requires explicitly consented collection under the fixed schema-4
+collector, which needs approval and physical participation.
+
+The repository-native comparator is a random-initialized `156,226`-parameter shared-eye encoder
+with paired features, yaw/pitch/roll input, yaw/pitch-degree output and an angular-cosine objective.
+It uses no public data or pretrained weights. It remains an unevaluated development comparator
+until the label gate passes; legacy evidence cannot validate schema-4 canonical alignment.
+
+If the label gate is legitimately resolved, the smallest predeclared capacity screen is exactly two
+80-epoch seed-7 runs: this compact estimator and the fixed OMZ baseline, using the same legacy eye
+crops, session roles and shared procedure fields. Continue the pair at seeds 19 and 43 only if the
+compact run passes every gate on every development session and strictly improves the worst-session
+score over its seed-7 baseline. The total budget is therefore two runs initially and six runs at
+most. This isolates the declared model factor on legacy inputs; it cannot validate schema-4
+canonical alignment.
 
 ## Privacy and retention
 
@@ -102,7 +151,9 @@ The trainer:
 - accepts only sessions marked `finished` and requires every role explicitly on the command line
 - never creates a row-level random split
 - validates the 810-row target plan and every eye image
+- validates schema-4 session contracts and recomputes alignment and clipping evidence from raw axes
 - reconstructs target coordinates and angles from stored display geometry
+- stops before training when numeric target pitch or head-pitch orientation is inconsistent
 - keeps training and development sessions disjoint
 - applies confidence, eye-openness and head-roll filtering consistently to legacy sessions
 - requires each development session to retain at least 100 samples per pose block, 50 lens samples
@@ -119,10 +170,18 @@ confidence of at least `0.70`, rejects absolute roll above `20°`, waits one sec
 changes and spreads samples over a longer interval. The loader also excludes the first lens target
 from schema-1 sessions because it may overlap the end of a prompted head turn.
 
+Schema 4 keeps schemas 1–3 loadable under their exact legacy preprocessing and digest shape, but a
+single run may not mix legacy and canonical input contracts. New reports and checkpoints bind the
+input preprocessing, label-contract digest and schema-specific quality evidence. Ordinary loading
+still accepts checkpoint formats 1–3; only format 4 and candidate-manifest format 2 may enter a new
+freeze or final evaluation.
+
 ## Train and select a checkpoint
 
 Use a new output directory for every run; the trainer refuses to overwrite an existing report or
-checkpoint.
+checkpoint. Training is currently blocked by the numeric pitch gate. The command below documents
+the rejected OMZ procedure for local reproducibility; it is not a recommendation to continue tuning
+or to launch a run against the current sessions.
 
 ```bash
 uv run --project Training python Training/train_gaze.py train \

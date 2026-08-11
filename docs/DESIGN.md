@@ -165,6 +165,40 @@ two physically valid schema-2/3 sessions as simultaneous development evidence; t
 consumed schema-1 evidence is not eligible for honest pose validation because recorded head poses
 do not separate the prompts reliably.
 
+### Schema 4 foundation and blocking pitch contradiction
+
+The tracked schema-4 foundation defines canonical paired-eye crops directly in source-pixel
+coordinates. It records source dimensions; versioned crop, physical-lens label and Apple Vision
+head-pose contracts; raw eye axes; one paired rotation and scale; inter-eye disagreement; pupil and
+contour evidence; and geometric crop-clipping fractions. Missing or degenerate axes reject a frame,
+and a source-frame size change fails the session. These are inspectable quality signals, not a
+validated occlusion score or an approved clipping, disagreement or occlusion threshold.
+
+Historical schemas 1–3 retain only their final `60 × 60` crops. They lack the source axes and
+requested crop geometry needed to reproduce the canonical affine sample, so they cannot be
+converted into schema 4 or support a paired legacy-versus-canonical alignment ablation. A second
+transform of those PNGs would be a different, lossy input path.
+
+Numeric pitch direction is a pre-training gate. Target labels must reproduce the physical display
+geometry. Apple Vision revision 3 defines positive head pitch as head-down, so each eligible session
+must show `lookUp − neutral ≤ -5°` and `lookDown − neutral ≥ 5°` from the recorded numeric values.
+Prompt names never authorize flipping historical rows.
+
+The two eligible consumed development sessions pass the within-session magnitude and
+opposite-direction checks but disagree on the cross-session `lookUp − neutral` sign. A read-only
+provenance investigation on 2026-08-11 resolved the contradiction as a genuinely inverted
+recording, not a producer or import bug: the installed SDK header independently confirms the
+head-down-positive convention; no historical tracker, recorder, gate or loader version ever
+negated pitch; and the inverted session's neutral pitch median and yaw prompt signs match every
+other session, which a numeric sign flip would also have inverted. The historical collector
+learned the vertical prompt sign from the first accepted `lookUp` sample and then coached the
+participant to hold it, so one session recorded faithful Vision values under physically inverted
+prompted motion. Its numeric values are therefore unchanged and it remains consumed, but it is not
+eligible pitch-gated development evidence, and no per-session correction is permitted. With only
+one eligible development session, the two-development-session comparison contract cannot be
+satisfied, so no model comparison was launched. The schema-4 collector gate now enforces the
+Vision convention directly and cannot re-record this inversion.
+
 ### Deterministic selection and bounded tuning
 
 Every epoch is scored independently on each development session. Selection minimizes:
@@ -279,7 +313,7 @@ It does not prove the current source, gaze quality or all-host compatibility.
 | capture, preview and diagnostics | Release hardware-measured | keep |
 | Vision tracking and pose | Release hardware-measured | keep; placement is not claimed |
 | geometric correction | Release hardware-exercised; naturalness rejected or unproven | keep only as rejected development baseline |
-| appearance gaze estimator | unit-tested, converted and evaluated offline | current OMZ full-fine-tuning direction rejected |
+| appearance gaze estimator | schema-4 foundation, synthetic Release-tested crop/serialization path, compact comparator unit-tested offline | execution blocked by insufficient eligible development evidence; OMZ direction rejected |
 | temporal gate and fallback | unit-tested; selected fallback paths hardware-measured | keep |
 | CoreMediaIO virtual camera | signed/notarized and three-host measured | keep; matrix incomplete |
 | UI and lifecycle hardening | Release-tested with sustained soak | keep; product quality remains blocked by gaze |
@@ -297,22 +331,32 @@ A pass at one level does not imply the next.
 
 ## 8. Remaining blockers and next step
 
-The current blocker is cross-session angular-tail stability, especially vertical and physical-lens
-error. The leading unresolved hypotheses are crop alignment and clipping, occlusion/tracking
-quality, pitch-label shift, limited first-party session diversity and insufficient model/input
-structure. Core ML conversion is not the blocker.
+The head-pitch contradiction is diagnosed: one consumed development session is genuinely
+physically inverted and stays excluded from pitch-gated evidence, leaving only one eligible
+development session. The immediate blocker is therefore insufficient eligible development
+evidence, and beyond it angular-tail stability, especially vertical and physical-lens error,
+remains unresolved. The leading hypotheses are crop alignment and clipping, occlusion/tracking
+quality, limited first-party session diversity and insufficient model/input structure. Core ML
+conversion is not the blocker.
 
-Recommended next step, requiring approval before tracked adoption:
+The next step is not training, native integration or an immediate recording. The offline label
+gate must pass before model code can execute, and it cannot pass under the frozen two-session
+development roles. Producing new eligible development evidence means explicitly consented
+collection under the fixed schema-4 collector, which requires approval and physical
+participation. The production Core Image crop sampling and schema-4 serialization are now
+Release-tested against deterministic synthetic frames, but the rendered crop remains unverified
+on recorded biometric evidence and canonical alignment remains unmeasured until compatible
+development evidence is legitimately available.
 
-1. add explicit crop clipping and occlusion-quality metadata to collection
-2. verify numeric pitch direction independently of prompt names
-3. compare canonical roll-normalized paired-eye alignment under the same session roles and gates
-4. if that controlled input change is insufficient, implement a compact paired-eye/head-pose
-   angular model from the published architecture evidence without importing uncleared code or
-   weights
-5. train only on first-party data whose consent and derived-weight terms match the intended use
+If the pitch contract is resolved, any compact comparison must be predeclared, use only cleared
+first-party data and random initialization, preserve the fixed session roles and exact gates, and
+change one major factor at a time. The smallest capacity screen is exactly two 80-epoch seed-7 runs:
+the `156,226`-parameter compact estimator and the fixed OMZ baseline on the same legacy crops, roles
+and shared procedure fields. Run the pair at seeds 19 and 43 only if the compact seed-7 run passes
+every per-session gate and strictly improves over its paired baseline, for a maximum of six runs.
+This screens the declared model factor on legacy inputs; it cannot validate schema-4 alignment.
 
-Do not integrate a learned estimator or request a new untouched recording until the redesigned
+Do not integrate a learned estimator or request a new untouched recording until a redesigned
 procedure passes both development sessions at all three fixed seeds and is frozen into the current
 manifest/ledger protocol. If a frozen candidate later passes one new untouched session, request
 approval for native integration; do not treat that personalized pass as general-user or
