@@ -6,7 +6,6 @@ import AspectusKit
 struct GazeDatasetView: View {
     @Environment(\.dismissWindow) private var dismissWindow
     @ObservedObject var controller: PipelineController
-    @State private var split: GazeDatasetSplit = .training
     @State private var confirmingDelete = false
     @State private var datasetWindow: NSWindow?
     @State private var isFullScreen = false
@@ -83,31 +82,42 @@ struct GazeDatasetView: View {
         .padding(44)
     }
 
+    // schema-5 role assignment is fixed by recording position, not by choice: the first four
+    // sessions fill the training slots and the next two fill the development (validation) slots.
+    // Exposing that as a picker would let a role be chosen after seeing how a sitting is going,
+    // which is exactly what the frozen protocol forbids.
+    private static let trainingSlots = 4
+    private static let validationSlots = 2
+
+    private var nextSplit: GazeDatasetSplit {
+        recorded.training < Self.trainingSlots ? .training : .validation
+    }
+
+    private var nextSlotLabel: String {
+        switch nextSplit {
+        case .training:
+            return "training · slot \(recorded.training + 1) of \(Self.trainingSlots)"
+        case .validation:
+            return "validation · slot \(recorded.validation + 1) of \(Self.validationSlots)"
+        }
+    }
+
     private var setupDetails: some View {
         VStack(alignment: .leading, spacing: 20) {
-            HStack(spacing: 14) {
-                Image(systemName: "eye.square")
-                    .font(.system(size: 38)).foregroundStyle(.cyan)
-                Text("Collect gaze model data").font(.largeTitle.weight(.semibold))
-            }
+            Text("Collect gaze model data").font(.largeTitle.weight(.semibold))
             Text("A dot will move across the display while you hold "
                  + "\(GazePosePrompt.allCases.count) gentle head positions. "
                  + "Look at the dot with your eyes and keep the requested head position steady.")
                 .font(.title3).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // an unlabelled segmented control disappears into the black background whenever the
-            // window is not key, and this choice decides which slot the session fills
             VStack(alignment: .leading, spacing: 7) {
                 Text("Session role").font(.callout.weight(.medium))
-                Picker("Session role", selection: $split) {
-                    Text("Training").tag(GazeDatasetSplit.training)
-                    Text("Validation").tag(GazeDatasetSplit.validation)
-                }
-                .pickerStyle(.segmented).frame(width: 320)
-                .labelsHidden()
+                Text("next: \(nextSlotLabel)")
+                    .font(.body.monospaced())
             }
             .padding(.horizontal, 14).padding(.vertical, 11)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
 
             VStack(alignment: .leading, spacing: 9) {
@@ -122,6 +132,7 @@ struct GazeDatasetView: View {
             }
             .font(.callout).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+            .labelStyle(.aligned)
 
             Text(recorded.training + recorded.validation == 0
                  ? "no schema-\(GazeDatasetSchema5.version) sessions recorded yet"
@@ -132,23 +143,21 @@ struct GazeDatasetView: View {
             if let error = controller.datasetError {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.orange)
+                    .labelStyle(.aligned)
             }
 
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
-                    if isFullScreen {
-                        Button("Start \(split == .training ? "training" : "validation") session") {
-                            controller.startGazeDataset(split)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!controller.isRunning)
-                        .help(controller.isRunning
-                              ? "Begin collecting" : "The camera has to be running first")
-                    } else {
-                        Button("Enter full screen") { datasetWindow?.toggleFullScreen(nil) }
-                            .buttonStyle(.borderedProminent)
+            VStack(spacing: 14) {
+                if isFullScreen {
+                    Button("Start \(nextSplit == .training ? "training" : "validation") session") {
+                        controller.startGazeDataset(nextSplit)
                     }
-                    Button("Close") { dismissWindow(id: "gaze-dataset") }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!controller.isRunning)
+                    .help(controller.isRunning
+                          ? "Begin collecting" : "The camera has to be running first")
+                } else {
+                    Button("Enter full screen") { datasetWindow?.toggleFullScreen(nil) }
+                        .buttonStyle(.borderedProminent)
                 }
 
                 if !isFullScreen {
@@ -163,9 +172,11 @@ struct GazeDatasetView: View {
                         confirmingDelete = true
                     }
                     .disabled(!hasCollectedData)
+                    Button("Close") { dismissWindow(id: "gaze-dataset") }
                 }
                 .font(.caption)
             }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -519,6 +530,22 @@ private struct GuidanceMeter: View {
 
     private var bandStart: Double { min(guidance.minimum / span, 1) }
     private var bandEnd: Double { min((guidance.maximum ?? span) / span, 1) }
+}
+
+/// Label defaults to top-aligning the icon against wrapped multi-line text, which reads as
+/// misaligned for a two-line bullet like "aligned eye crops...". Centering the icon on the whole
+/// text block instead keeps every bullet visually consistent regardless of line count.
+private struct CenteredIconLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(alignment: .center, spacing: 9) {
+            configuration.icon.frame(width: 16)
+            configuration.title
+        }
+    }
+}
+
+extension LabelStyle where Self == CenteredIconLabelStyle {
+    static var aligned: CenteredIconLabelStyle { CenteredIconLabelStyle() }
 }
 
 private struct DatasetWindowReader: NSViewRepresentable {
