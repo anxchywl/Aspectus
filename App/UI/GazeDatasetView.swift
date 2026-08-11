@@ -181,6 +181,8 @@ struct GazeDatasetView: View {
                     .font(.caption).foregroundStyle(.orange)
             }
 
+            // no in-content Close button: the window's own title-bar close control already
+            // does this, and duplicating it here was redundant
             HStack(spacing: 12) {
                 Button("Reveal collected data") { revealData() }
                     .disabled(!hasCollectedData)
@@ -188,7 +190,6 @@ struct GazeDatasetView: View {
                     confirmingDelete = true
                 }
                 .disabled(!hasCollectedData)
-                Button("Close") { dismissWindow(id: "gaze-dataset") }
             }
             .font(.caption)
         }
