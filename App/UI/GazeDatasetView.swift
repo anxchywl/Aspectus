@@ -4,7 +4,6 @@ import AspectusKit
 
 /// explicit full-screen collection flow for the appearance-based gaze estimator
 struct GazeDatasetView: View {
-    @Environment(\.dismissWindow) private var dismissWindow
     @ObservedObject var controller: PipelineController
     @State private var confirmingDelete = false
     @State private var datasetWindow: NSWindow?
@@ -407,10 +406,12 @@ struct GazeDatasetView: View {
                 Text("saved in the private model-data folder")
                     .font(.caption).foregroundStyle(.tertiary)
             }
+            // Done returns to setup rather than closing the window: the window's own title-bar
+            // close control already covers "I'm finished here", so the in-content primary action
+            // is free to mean "ready for the next session" instead of duplicating that.
             HStack {
                 Button("Reveal data") { revealData() }
-                Button("New session") { controller.clearGazeDatasetResult() }
-                Button("Done") { dismissWindow(id: "gaze-dataset") }
+                Button("Done") { controller.clearGazeDatasetResult() }
                     .buttonStyle(.borderedProminent)
             }
         }
