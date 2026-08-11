@@ -71,6 +71,28 @@ targets:
         # the extension lands here, which is where the system looks for it
         SYSTEM_EXTENSION_INSTALL_PATH: $(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Library/SystemExtensions
 
+  # standalone unit-test bundle that compiles the narrow recorder sources directly, so the
+  # production Core Image sampling and schema-4 serialization run without a camera or host app
+  AspectusAppTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/AspectusAppTests
+      - path: App/Pipeline/GazeDatasetRecorder.swift
+      - path: App/Pipeline/CVReadyFrame.swift
+    dependencies:
+      - package: AspectusKit
+        product: AspectusKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aspectus.app.apptests
+        GENERATE_INFOPLIST_FILE: true
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: $(ASPECTUS_CODE_SIGN_IDENTITY)
+        DEVELOPMENT_TEAM: $(ASPECTUS_TEAM_ID)
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+
   AspectusCameraExtension:
     type: system-extension
     platform: macOS
@@ -110,3 +132,12 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
         ENABLE_HARDENED_RUNTIME: true
         SKIP_INSTALL: true
+
+schemes:
+  AspectusAppTests:
+    build:
+      targets:
+        AspectusAppTests: test
+    test:
+      targets:
+        - AspectusAppTests

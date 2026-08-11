@@ -31,6 +31,16 @@ xcodebuild -project Aspectus.xcodeproj -scheme Aspectus -configuration Release \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO ENTITLEMENTS_REQUIRED=NO build
 ```
 
+The `AspectusAppTests` unit-test bundle compiles the dataset recorder's production sources
+directly, so its Core Image crop sampling and schema-4 serialization run against deterministic
+synthetic frames without a camera, a host app or any real storage location:
+
+```bash
+xcodebuild -project Aspectus.xcodeproj -scheme AspectusAppTests -configuration Release \
+  -destination 'platform=macOS,arch=arm64' \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test
+```
+
 Deployment target is macOS 14. Swift 6 strict concurrency is enabled. The supported architecture is
 Apple Silicon.
 
