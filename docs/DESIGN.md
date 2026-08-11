@@ -406,13 +406,19 @@ anything at or below 12° empties that block entirely. Coverage validation catch
 below 100 retained rows per pose, though only for sessions carrying a development or validation
 role. Anyone screening this factor should read the per-pose retention before the aggregate.
 
-If the pitch contract is resolved, any compact comparison must be predeclared, use only cleared
-first-party data and random initialization, preserve the fixed session roles and exact gates, and
-change one major factor at a time. The smallest capacity screen is exactly two 80-epoch seed-7 runs:
-the `156,226`-parameter compact estimator and the fixed OMZ baseline on the same legacy crops, roles
-and shared procedure fields. Run the pair at seeds 19 and 43 only if the compact seed-7 run passes
-every per-session gate and strictly improves over its paired baseline, for a maximum of six runs.
-This screens the declared model factor on legacy inputs; it cannot validate schema-4 alignment.
+The compact screen this section previously predeclared on legacy crops is void rather than pending.
+It required preserving the fixed session roles, and one of those two development sessions is the
+proven physically inverted session, so no substitution can satisfy it without changing the contract
+that excluded that session in the first place. It also could not have validated canonical alignment,
+which is the thing the redesign changed. It is retired, not deferred, and no result may be produced
+under it.
+
+The replacement is predeclared in
+[docs/schema5-experiment-protocol.md](schema5-experiment-protocol.md), frozen before the first
+schema-5 recording: six valid sessions, roles fixed by recording position rather than outcome, the
+`156,226`-parameter compact estimator from random initialization, the same three fixed seeds and
+exact gates, and one declared factor at a time. Phase-3 screening outcomes do not carry into it,
+having been measured on a different architecture and a different input contract.
 
 Do not integrate a learned estimator or request a new untouched recording until a redesigned
 procedure passes both development sessions at all three fixed seeds and is frozen into the current
