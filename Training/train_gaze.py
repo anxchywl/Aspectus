@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import csv
 from datetime import datetime, timezone
 import fcntl
@@ -50,10 +51,11 @@ MINIMUM_VALIDATION_VERTICAL_POSE_SEPARATION_DEGREES = 5.0
 CANONICAL_MAXIMUM_MEDIAN_DEGREES = 2.0
 CANONICAL_MAXIMUM_P95_DEGREES = 5.0
 CANONICAL_MAXIMUM_LENS_P95_DEGREES = 3.0
-CHECKPOINT_FORMAT_VERSION = 3
+CHECKPOINT_FORMAT_VERSION = 4
+SUPPORTED_CHECKPOINT_FORMAT_VERSIONS = frozenset({1, 2, 3, CHECKPOINT_FORMAT_VERSION})
 FINAL_EVALUATION_FILENAME = "final-evaluation.json"
 CANDIDATE_MANIFEST_FILENAME = "candidate-manifest.json"
-CANDIDATE_MANIFEST_FORMAT_VERSION = 1
+CANDIDATE_MANIFEST_FORMAT_VERSION = 2
 ROBUSTNESS_SEEDS = (7, 19, 43)
 PRIMARY_CANDIDATE_SEED = ROBUSTNESS_SEEDS[0]
 FINAL_EVALUATION_LEDGER_FILENAME = ".aspectus-final-evaluation-ledger.json"
@@ -61,6 +63,74 @@ FINAL_EVALUATION_LEDGER_LOCK_FILENAME = ".aspectus-final-evaluation-ledger.lock"
 MAXIMUM_COREML_ANGULAR_DIFFERENCE_DEGREES = 0.25
 PRETRAINED_ARCHITECTURE = "openvino-gaze-estimation-adas-0002-personalized-symmetric-v3"
 NATIVE_ARCHITECTURE = "shared-eye-spatial-cnn-head-pose-v2"
+NATIVE_PARAMETER_COUNT = 156_226
+LEGACY_INPUT_CONTRACT = "legacy-axis-aligned-eye-crops-v1"
+CANONICAL_INPUT_CONTRACT = "canonical-paired-eye-v1"
+CANONICAL_CROP_CONTRACT = {
+    "version": 1,
+    "coordinateSpace": "source-image-fraction-top-left",
+    "axisExtractor": "farthest-contour-pair-ordered-image-x",
+    "alignment": "circular-mean-paired-eye-axes",
+    "center": "per-eye-axis-midpoint",
+    "scale": "1.8x-maximum-eye-axis-length-pixels",
+    "outputWidth": IMAGE_SIZE,
+    "outputHeight": IMAGE_SIZE,
+    "sampling": "core-image-affine-hq-downsample-edge-clamp",
+    "colorSpace": "sRGB",
+}
+CANONICAL_LABEL_CONTRACT = {
+    "version": 1,
+    "units": "degrees",
+    "origin": "physical-lens",
+    "yawPositive": "subject-right",
+    "pitchPositive": "up",
+}
+CANONICAL_HEAD_POSE_CONTRACT = {
+    "version": 1,
+    "source": "Vision.VNFaceObservation.face-rectangles-revision-3",
+    "units": "degrees",
+    "order": "yaw-pitch-roll",
+    "yawPositive": "counterclockwise",
+    "pitchPositive": "head-down",
+    "rollPositive": "counterclockwise",
+}
+INPUT_PREPROCESSING_CONTRACTS = {
+    LEGACY_INPUT_CONTRACT: {
+        "contract": LEGACY_INPUT_CONTRACT,
+        "image_width": IMAGE_SIZE,
+        "image_height": IMAGE_SIZE,
+        "color_space": "sRGB",
+        "pixel_normalization": "rgb-zero-to-one",
+        "image_resize": "none",
+        "alignment": "none",
+        "recorder_crop_contract": "historical-unversioned",
+        "head_pose_units": "degrees",
+        "head_pose_order": "yaw-pitch-roll",
+        "head_pose_tensor_encoding": "raw-degrees",
+        "head_pose_source_contract": "historical-unversioned",
+    },
+    CANONICAL_INPUT_CONTRACT: {
+        "contract": CANONICAL_INPUT_CONTRACT,
+        "image_width": IMAGE_SIZE,
+        "image_height": IMAGE_SIZE,
+        "color_space": "sRGB",
+        "pixel_normalization": "rgb-zero-to-one",
+        "image_resize": "none",
+        "alignment": "recorder-canonical-paired-eye-v1",
+        "recorder_crop_contract": CANONICAL_CROP_CONTRACT,
+        "head_pose_units": "degrees",
+        "head_pose_order": "yaw-pitch-roll",
+        "head_pose_tensor_encoding": "raw-degrees",
+        "head_pose_source_contract": CANONICAL_HEAD_POSE_CONTRACT,
+    },
+}
+SCHEMA_FOUR_CROP_SCALE = 1.8
+SCHEMA_FOUR_SERIALIZATION_RESOLUTION = 1e-12
+SCHEMA_FOUR_DERIVED_ANGLE_TOLERANCE_DEGREES = 1e-6
+SCHEMA_FOUR_DERIVED_CLIPPING_TOLERANCE = 1e-8
+SCHEMA_FOUR_ALLOWED_PUPIL_SOURCES = frozenset({
+    "visionLandmark", "contourCentroid", "none",
+})
 POSE_PROMPTS = ("neutral", "turnLeft", "turnRight", "lookUp", "lookDown")
 TARGETS_PER_POSE = 27
 GRID_FRACTIONS = (0.10, 0.30, 0.50, 0.70, 0.90)
@@ -101,6 +171,7 @@ CANDIDATE_FACTOR_FIELDS = {
     "optimizer": ("optimizer",),
     "loss": ("loss",),
     "augmentation": ("augmentation",),
+    "input": ("input_preprocessing",),
     "filtering": (
         "filtering", "training_data_sha256", "development_data_sha256",
         "training_samples", "development_samples",
@@ -111,7 +182,7 @@ CANDIDATE_SHARED_FIELDS = (
     "training_sessions", "development_sessions", "source_training_data_sha256",
     "source_development_data_sha256", "setup_sha256", "known_completed_sessions",
     "source_training_samples", "source_development_samples",
-    "software_versions", "trainer_sha256",
+    "software_versions", "trainer_sha256", "label_contract_sha256",
 )
 REQUIRED_COLUMNS = {
     "schema_version",
@@ -135,6 +206,49 @@ REQUIRED_COLUMNS = {
     "left_image",
     "right_image",
 }
+SCHEMA_FOUR_COLUMNS = {
+    "frame_id",
+    "elapsed_s",
+    "contour_points_l",
+    "contour_points_r",
+    "pupil_source_l",
+    "pupil_source_r",
+    "pupil_points_l",
+    "pupil_points_r",
+    "axis_start_x_l",
+    "axis_start_y_l",
+    "axis_end_x_l",
+    "axis_end_y_l",
+    "axis_start_x_r",
+    "axis_start_y_r",
+    "axis_end_x_r",
+    "axis_end_y_r",
+    "alignment_rotation_deg",
+    "alignment_disagreement_deg",
+    "crop_side_px",
+    "crop_clipped_fraction_l",
+    "crop_clipped_fraction_r",
+}
+
+
+@dataclass(frozen=True)
+class EyeQualityEvidence:
+    contour_point_count: int
+    pupil_source: str
+    pupil_point_count: int
+    axis_start: tuple[float, float]
+    axis_end: tuple[float, float]
+    crop_clipped_fraction: float
+
+
+@dataclass(frozen=True)
+class CanonicalAlignmentEvidence:
+    source_image_size: tuple[int, int]
+    left: EyeQualityEvidence
+    right: EyeQualityEvidence
+    rotation_degrees: float
+    disagreement_degrees: float
+    crop_side_pixels: float
 
 
 @dataclass(frozen=True)
@@ -157,6 +271,9 @@ class Sample:
     session_created_at: str = ""
     session_metadata_sha256: str = ""
     manifest_sha256: str = ""
+    input_contract: str = ""
+    label_contract_sha256: str = ""
+    canonical_alignment: CanonicalAlignmentEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -393,6 +510,290 @@ def finite_float(row: dict[str, str], column: str) -> float:
     return value
 
 
+def finite_integer(row: dict[str, str], column: str, minimum: int = 0) -> int:
+    value = row[column]
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise ValueError(f"manifest contains an invalid {column}") from error
+    if str(parsed) != value or parsed < minimum:
+        raise ValueError(f"manifest contains an invalid {column}")
+    return parsed
+
+
+def validated_positive_integer(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"session {name} is invalid")
+    return value
+
+
+def label_contract_digest() -> str:
+    return canonical_digest(CANONICAL_LABEL_CONTRACT)
+
+
+def matches_canonical_contract(value: object, expected: object) -> bool:
+    try:
+        return canonical_digest(value) == canonical_digest(expected)
+    except (TypeError, ValueError):
+        return False
+
+
+def input_preprocessing_contract(contract: str) -> dict[str, object]:
+    try:
+        return deepcopy(INPUT_PREPROCESSING_CONTRACTS[contract])
+    except KeyError as error:
+        raise ValueError(f"unsupported input preprocessing contract: {contract}") from error
+
+
+def validated_input_preprocessing(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError("frozen checkpoint input preprocessing is invalid")
+    contract = value.get("contract")
+    if not isinstance(contract, str):
+        raise ValueError("frozen checkpoint input preprocessing is invalid")
+    expected = input_preprocessing_contract(contract)
+    if not matches_canonical_contract(value, expected):
+        raise ValueError("frozen checkpoint input preprocessing contract mismatch")
+    return expected
+
+
+def sample_input_contract(sample: Sample) -> str:
+    if sample.input_contract:
+        return sample.input_contract
+    return CANONICAL_INPUT_CONTRACT if sample.schema_version == 4 else LEGACY_INPUT_CONTRACT
+
+
+def sample_label_contract_sha256(sample: Sample) -> str:
+    return sample.label_contract_sha256 or label_contract_digest()
+
+
+def require_single_input_preprocessing(*sample_groups: Iterable[Sample]) -> dict[str, object]:
+    contracts = {
+        sample_input_contract(sample)
+        for samples in sample_groups
+        for sample in samples
+    }
+    if len(contracts) != 1:
+        raise ValueError("training and development sessions mix input preprocessing contracts")
+    return input_preprocessing_contract(next(iter(contracts)))
+
+
+def require_single_label_contract(*sample_groups: Iterable[Sample]) -> str:
+    digests = {
+        sample_label_contract_sha256(sample)
+        for samples in sample_groups
+        for sample in samples
+    }
+    if len(digests) != 1:
+        raise ValueError("training and development sessions mix label contracts")
+    digest = validated_sha256(next(iter(digests)), "label contract")
+    if digest != label_contract_digest():
+        raise ValueError("unsupported label contract")
+    return digest
+
+
+def schema_four_axis(
+    start: tuple[float, float], end: tuple[float, float],
+    source_width: int, source_height: int,
+) -> tuple[tuple[float, float], float, float]:
+    first = (start[0] * source_width, start[1] * source_height)
+    second = (end[0] * source_width, end[1] * source_height)
+    dx = second[0] - first[0]
+    dy = second[1] - first[1]
+    length = math.hypot(dx, dy)
+    if length <= 1e-6:
+        raise ValueError("schema-4 eye alignment axis is degenerate")
+    return (
+        ((first[0] + second[0]) / 2, (first[1] + second[1]) / 2),
+        length,
+        math.atan2(dy, dx),
+    )
+
+
+def clip_polygon(
+    polygon: list[tuple[float, float]],
+    inside: Callable[[tuple[float, float]], bool],
+    intersection: Callable[
+        [tuple[float, float], tuple[float, float]], tuple[float, float]
+    ],
+) -> list[tuple[float, float]]:
+    if not polygon:
+        return []
+    previous = polygon[-1]
+    result: list[tuple[float, float]] = []
+    for current in polygon:
+        if inside(current):
+            if not inside(previous):
+                result.append(intersection(previous, current))
+            result.append(current)
+        elif inside(previous):
+            result.append(intersection(previous, current))
+        previous = current
+    return result
+
+
+def clipped_crop_fraction(
+    center: tuple[float, float], rotation: float, side: float,
+    source_width: int, source_height: int,
+) -> float:
+    half = side / 2
+    axis = (math.cos(rotation), math.sin(rotation))
+    perpendicular = (-axis[1], axis[0])
+    polygon = [
+        (
+            center[0] + x * half * axis[0] + y * half * perpendicular[0],
+            center[1] + x * half * axis[1] + y * half * perpendicular[1],
+        )
+        for x, y in ((-1, -1), (1, -1), (1, 1), (-1, 1))
+    ]
+
+    def vertical(boundary: float):
+        def intersection(first: tuple[float, float], second: tuple[float, float]):
+            dx = second[0] - first[0]
+            amount = (boundary - first[0]) / dx if abs(dx) > 1e-12 else 0
+            return boundary, first[1] + amount * (second[1] - first[1])
+        return intersection
+
+    def horizontal(boundary: float):
+        def intersection(first: tuple[float, float], second: tuple[float, float]):
+            dy = second[1] - first[1]
+            amount = (boundary - first[1]) / dy if abs(dy) > 1e-12 else 0
+            return first[0] + amount * (second[0] - first[0]), boundary
+        return intersection
+
+    polygon = clip_polygon(polygon, lambda point: point[0] >= 0, vertical(0))
+    polygon = clip_polygon(
+        polygon, lambda point: point[0] <= source_width, vertical(source_width)
+    )
+    polygon = clip_polygon(polygon, lambda point: point[1] >= 0, horizontal(0))
+    polygon = clip_polygon(
+        polygon, lambda point: point[1] <= source_height, horizontal(source_height)
+    )
+    if len(polygon) < 3:
+        visible_area = 0.0
+    else:
+        twice_area = sum(
+            polygon[index][0] * polygon[(index + 1) % len(polygon)][1]
+            - polygon[(index + 1) % len(polygon)][0] * polygon[index][1]
+            for index in range(len(polygon))
+        )
+        visible_area = abs(twice_area) / 2
+    return min(1.0, max(0.0, 1 - visible_area / (side * side)))
+
+
+def schema_four_eye_evidence(
+    row: dict[str, str], suffix: str,
+) -> EyeQualityEvidence:
+    contour_points = finite_integer(row, f"contour_points_{suffix}", minimum=2)
+    pupil_source = row[f"pupil_source_{suffix}"]
+    if pupil_source not in SCHEMA_FOUR_ALLOWED_PUPIL_SOURCES:
+        raise ValueError("schema-4 pupil source is invalid")
+    pupil_points = finite_integer(row, f"pupil_points_{suffix}")
+    if (pupil_source == "visionLandmark") != (pupil_points > 0):
+        raise ValueError("schema-4 pupil evidence is inconsistent")
+    start = (
+        finite_float(row, f"axis_start_x_{suffix}"),
+        finite_float(row, f"axis_start_y_{suffix}"),
+    )
+    end = (
+        finite_float(row, f"axis_end_x_{suffix}"),
+        finite_float(row, f"axis_end_y_{suffix}"),
+    )
+    if not (start[0] < end[0] or (start[0] == end[0] and start[1] <= end[1])):
+        raise ValueError("schema-4 eye alignment axis ordering is invalid")
+    clipped_fraction = finite_float(row, f"crop_clipped_fraction_{suffix}")
+    if not 0 <= clipped_fraction <= 1:
+        raise ValueError("schema-4 crop clipping fraction is invalid")
+    return EyeQualityEvidence(
+        contour_point_count=contour_points,
+        pupil_source=pupil_source,
+        pupil_point_count=pupil_points,
+        axis_start=start,
+        axis_end=end,
+        crop_clipped_fraction=clipped_fraction,
+    )
+
+
+def schema_four_alignment_evidence(
+    row: dict[str, str], source_width: int, source_height: int,
+) -> CanonicalAlignmentEvidence:
+    left = schema_four_eye_evidence(row, "l")
+    right = schema_four_eye_evidence(row, "r")
+    left_center, left_length, left_angle = schema_four_axis(
+        left.axis_start, left.axis_end, source_width, source_height
+    )
+    right_center, right_length, right_angle = schema_four_axis(
+        right.axis_start, right.axis_end, source_width, source_height
+    )
+    sine = math.sin(left_angle) + math.sin(right_angle)
+    cosine = math.cos(left_angle) + math.cos(right_angle)
+    if math.hypot(sine, cosine) <= 1e-6:
+        raise ValueError("schema-4 paired-eye alignment axes are inconsistent")
+    rotation = math.atan2(sine, cosine)
+    disagreement = abs(math.atan2(
+        math.sin(left_angle - right_angle), math.cos(left_angle - right_angle)
+    ))
+    crop_side = SCHEMA_FOUR_CROP_SCALE * max(left_length, right_length)
+    actual_rotation = finite_float(row, "alignment_rotation_deg")
+    actual_disagreement = finite_float(row, "alignment_disagreement_deg")
+    actual_crop_side = finite_float(row, "crop_side_px")
+    if not -180 <= actual_rotation <= 180 \
+            or not 0 <= actual_disagreement <= 180 \
+            or actual_crop_side <= 0:
+        raise ValueError("schema-4 alignment evidence is outside its valid range")
+    expected_rotation = math.degrees(rotation)
+    expected_disagreement = math.degrees(disagreement)
+    source_diagonal = math.hypot(source_width, source_height)
+    angle_tolerance = max(
+        SCHEMA_FOUR_DERIVED_ANGLE_TOLERANCE_DEGREES,
+        math.degrees(
+            4 * source_diagonal * SCHEMA_FOUR_SERIALIZATION_RESOLUTION
+            / min(left_length, right_length)
+        ),
+    )
+    crop_side_tolerance = (
+        4 * SCHEMA_FOUR_CROP_SCALE * source_diagonal
+        * SCHEMA_FOUR_SERIALIZATION_RESOLUTION
+        + 1e-9
+    )
+    values = (
+        (actual_rotation, expected_rotation, angle_tolerance),
+        (
+            actual_disagreement,
+            expected_disagreement,
+            angle_tolerance,
+        ),
+        (actual_crop_side, crop_side, crop_side_tolerance),
+        (
+            left.crop_clipped_fraction,
+            clipped_crop_fraction(
+                left_center, rotation, crop_side, source_width, source_height
+            ),
+            SCHEMA_FOUR_DERIVED_CLIPPING_TOLERANCE,
+        ),
+        (
+            right.crop_clipped_fraction,
+            clipped_crop_fraction(
+                right_center, rotation, crop_side, source_width, source_height
+            ),
+            SCHEMA_FOUR_DERIVED_CLIPPING_TOLERANCE,
+        ),
+    )
+    if not all(
+        math.isclose(actual, expected, rel_tol=0, abs_tol=tolerance)
+        for actual, expected, tolerance in values
+    ):
+        raise ValueError("schema-4 derived alignment evidence does not match its source geometry")
+    return CanonicalAlignmentEvidence(
+        source_image_size=(source_width, source_height),
+        left=left,
+        right=right,
+        rotation_degrees=actual_rotation,
+        disagreement_degrees=actual_disagreement,
+        crop_side_pixels=actual_crop_side,
+    )
+
+
 def parsed_utc_timestamp(value: object, name: str) -> datetime:
     if not isinstance(value, str):
         raise ValueError(f"session {name} timestamp is invalid")
@@ -414,8 +815,13 @@ def validated_session_timestamps(metadata: dict[str, object]) -> tuple[str, str]
 
 
 def validated_session_setup(
-    metadata: dict[str, object]
-) -> tuple[dict[str, float], str]:
+    metadata: dict[str, object], schema_version: int | None = None,
+) -> tuple[dict[str, float], str, str, str, tuple[int, int] | None]:
+    if schema_version is None:
+        value = metadata.get("schemaVersion")
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("session schema version is invalid")
+        schema_version = value
     geometry = metadata.get("displayGeometry")
     if not isinstance(geometry, dict):
         raise ValueError("session display geometry is missing")
@@ -442,10 +848,46 @@ def validated_session_setup(
         "eye_image_height": IMAGE_SIZE,
         "eye_image_width": IMAGE_SIZE,
     }
+    input_contract = LEGACY_INPUT_CONTRACT
+    source_image_size: tuple[int, int] | None = None
+    if schema_version == 4:
+        source_width = validated_positive_integer(
+            metadata.get("sourceImageWidth"), "source image width"
+        )
+        source_height = validated_positive_integer(
+            metadata.get("sourceImageHeight"), "source image height"
+        )
+        if not matches_canonical_contract(
+            metadata.get("cropContract"), CANONICAL_CROP_CONTRACT
+        ):
+            raise ValueError("session schema-4 crop contract is invalid")
+        if not matches_canonical_contract(
+            metadata.get("labelContract"), CANONICAL_LABEL_CONTRACT
+        ):
+            raise ValueError("session schema-4 label contract is invalid")
+        if not matches_canonical_contract(
+            metadata.get("headPoseContract"), CANONICAL_HEAD_POSE_CONTRACT
+        ):
+            raise ValueError("session schema-4 head-pose contract is invalid")
+        source_image_size = (source_width, source_height)
+        input_contract = CANONICAL_INPUT_CONTRACT
+        setup.update({
+            "source_image_width": source_width,
+            "source_image_height": source_height,
+            "crop_contract": CANONICAL_CROP_CONTRACT,
+            "label_contract": CANONICAL_LABEL_CONTRACT,
+            "head_pose_contract": CANONICAL_HEAD_POSE_CONTRACT,
+        })
     binding = hashlib.sha256(
         json.dumps(setup, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    return values, binding
+    return (
+        values,
+        binding,
+        input_contract,
+        label_contract_digest(),
+        source_image_size,
+    )
 
 
 def expected_target_label(
@@ -514,7 +956,16 @@ def load_samples(
     for metadata_path, metadata in finished_session_metadata(root):
         session_id = str(metadata["sessionID"])
         stored_split = str(metadata["split"])
-        geometry, setup_binding = validated_session_setup(metadata)
+        schema_version = int(metadata["schemaVersion"])
+        if schema_version not in {1, 2, 3, 4}:
+            raise ValueError(f"unsupported gaze dataset schema: {schema_version}")
+        (
+            geometry,
+            setup_binding,
+            input_contract,
+            session_label_contract_sha256,
+            source_image_size,
+        ) = validated_session_setup(metadata, schema_version)
         session_created_at, _ = validated_session_timestamps(metadata)
         if selected_session_ids is None and stored_split != split:
             continue
@@ -525,10 +976,24 @@ def load_samples(
         manifest_path = metadata_path.with_name("manifest.csv")
         with manifest_path.open(newline="") as handle:
             reader = csv.DictReader(handle)
-            missing = REQUIRED_COLUMNS.difference(reader.fieldnames or ())
+            required_columns = REQUIRED_COLUMNS | (
+                SCHEMA_FOUR_COLUMNS if schema_version == 4 else set()
+            )
+            fieldnames = reader.fieldnames or []
+            missing = required_columns.difference(fieldnames)
             if missing:
                 raise ValueError(f"{manifest_path} is missing columns: {sorted(missing)}")
+            if schema_version == 4 and (
+                len(fieldnames) != len(required_columns)
+                or set(fieldnames) != required_columns
+            ):
+                raise ValueError("schema-4 manifest columns do not match the frozen contract")
             rows = list(reader)
+            if schema_version == 4 and any(
+                None in row or any(value is None for value in row.values())
+                for row in rows
+            ):
+                raise ValueError("schema-4 manifest rows do not match the frozen contract")
         session_metadata_sha256 = file_digest(metadata_path)
         manifest_sha256 = file_digest(manifest_path)
         expected = int(metadata["capturedSamples"])
@@ -542,13 +1007,12 @@ def load_samples(
             raise ValueError(
                 f"{session_id} metadata records {expected} samples but manifest has {len(rows)}"
             )
-        schema_version = int(metadata["schemaVersion"])
-        if schema_version not in {1, 2, 3}:
-            raise ValueError(f"unsupported gaze dataset schema: {schema_version}")
         sample_numbers = [int(row["sample"]) for row in rows]
         if sample_numbers != list(range(1, expected + 1)):
             raise ValueError(f"{session_id} sample sequence is incomplete")
         target_counts: dict[int, int] = {}
+        previous_frame_id = -1
+        previous_elapsed = -math.inf
         for row in rows:
             if row["participant_id"] != participant_id \
                     or row["session_id"] != session_id or row["split"] != stored_split:
@@ -568,6 +1032,21 @@ def load_samples(
             face_confidence = finite_float(row, "face_conf")
             left_openness = finite_float(row, "open_l")
             right_openness = finite_float(row, "open_r")
+            if schema_version == 4 and (
+                not 0 <= face_confidence <= 1
+                or not 0 <= left_openness <= 1
+                or not 0 <= right_openness <= 1
+            ):
+                raise ValueError("schema-4 tracking quality is outside its valid range")
+            if schema_version == 4:
+                frame_id = finite_integer(row, "frame_id")
+                elapsed = finite_float(row, "elapsed_s")
+                if elapsed < 0:
+                    raise ValueError("schema-4 elapsed time is invalid")
+                if frame_id <= previous_frame_id or elapsed <= previous_elapsed:
+                    raise ValueError("schema-4 frame timing is not strictly increasing")
+                previous_frame_id = frame_id
+                previous_elapsed = elapsed
             head_yaw = finite_float(row, "head_yaw_deg")
             head_pitch = finite_float(row, "head_pitch_deg")
             head_roll = finite_float(row, "head_roll_deg")
@@ -599,6 +1078,13 @@ def load_samples(
             if schema_version == 1 and expected_kind == "lens" \
                     and target_id % TARGETS_PER_POSE == 0:
                 continue
+            canonical_alignment = None
+            if schema_version == 4:
+                if source_image_size is None:
+                    raise ValueError("session schema-4 source image size is missing")
+                canonical_alignment = schema_four_alignment_evidence(
+                    row, *source_image_size
+                )
             if face_confidence < minimum_face_confidence \
                     or left_openness < MINIMUM_OPENNESS \
                     or right_openness < MINIMUM_OPENNESS \
@@ -624,6 +1110,9 @@ def load_samples(
                     session_created_at=session_created_at,
                     session_metadata_sha256=session_metadata_sha256,
                     manifest_sha256=manifest_sha256,
+                    input_contract=input_contract,
+                    label_contract_sha256=session_label_contract_sha256,
+                    canonical_alignment=canonical_alignment,
                 )
             )
         if target_counts != {target_id: samples_per_target for target_id in range(target_count)}:
@@ -716,12 +1205,89 @@ def validate_pose_coverage(samples: list[Sample], expected_sessions: Iterable[st
                 or abs(right_change) \
                 < MINIMUM_VALIDATION_HORIZONTAL_POSE_SEPARATION_DEGREES \
                 or left_change * right_change >= 0 \
-                or abs(up_change) < MINIMUM_VALIDATION_VERTICAL_POSE_SEPARATION_DEGREES \
-                or abs(down_change) < MINIMUM_VALIDATION_VERTICAL_POSE_SEPARATION_DEGREES \
-                or up_change * down_change >= 0:
+                or up_change > -MINIMUM_VALIDATION_VERTICAL_POSE_SEPARATION_DEGREES \
+                or down_change < MINIMUM_VALIDATION_VERTICAL_POSE_SEPARATION_DEGREES:
             raise ValueError(
                 "validation head-pose coverage does not separate the prompted poses"
             )
+
+
+def validate_numeric_pitch_contract(
+    samples: list[Sample], expected_sessions: Iterable[str],
+    require_head_pitch: bool = True,
+) -> None:
+    expected_sessions = list(expected_sessions)
+    eligible_head_pose_sessions = 0
+    for session_id in expected_sessions:
+        session_samples = [sample for sample in samples if sample.session_id == session_id]
+        if not session_samples:
+            raise ValueError("numeric pitch verification is missing a selected session")
+        lens_labels = [
+            sample.gaze_degrees
+            for sample in session_samples if sample.target_kind == "lens"
+        ]
+        screen_samples = [
+            sample for sample in session_samples if sample.target_kind == "screen"
+        ]
+        if not lens_labels or not screen_samples \
+                or not all(
+                    math.isclose(value, 0, rel_tol=0,
+                                 abs_tol=TARGET_LABEL_ABSOLUTE_TOLERANCE)
+                    for label in lens_labels for value in label
+                ) \
+                or not all(sample.gaze_degrees[1] < 0 for sample in screen_samples):
+            raise ValueError("numeric lens and screen label contract is invalid")
+        yaw_by_x: dict[float, list[float]] = {}
+        pitch_by_y: dict[float, list[float]] = {}
+        for sample in screen_samples:
+            yaw_by_x.setdefault(sample.target_position[0], []).append(
+                sample.gaze_degrees[0]
+            )
+            pitch_by_y.setdefault(sample.target_position[1], []).append(
+                sample.gaze_degrees[1]
+            )
+        horizontal = [
+            statistics.fmean(yaw_by_x[position])
+            for position in sorted(yaw_by_x)
+        ]
+        vertical = [
+            statistics.fmean(pitch_by_y[position])
+            for position in sorted(pitch_by_y)
+        ]
+        if len(horizontal) < 2 \
+                or not all(left < right for left, right in zip(
+                    horizontal, horizontal[1:]
+                )):
+            raise ValueError("numeric target yaw is not monotonic across the display")
+        if len(vertical) < 2 \
+                or not all(upper > lower for upper, lower in zip(
+                    vertical, vertical[1:]
+                )):
+            raise ValueError("numeric target pitch is not monotonic down the display")
+
+        schema_versions = {sample.schema_version for sample in session_samples}
+        if max(schema_versions, default=0) < 2:
+            continue
+        eligible_head_pose_sessions += 1
+        pose_pitches = {
+            pose_index: [
+                sample.head_pose[1] for sample in session_samples
+                if sample.target_id // TARGETS_PER_POSE == pose_index
+            ]
+            for pose_index in (0, 3, 4)
+        }
+        if any(not values for values in pose_pitches.values()):
+            raise ValueError("numeric head-pitch verification lacks a pose block")
+        neutral = statistics.median(pose_pitches[0])
+        up_change = statistics.median(pose_pitches[3]) - neutral
+        down_change = statistics.median(pose_pitches[4]) - neutral
+        if up_change > -MINIMUM_VALIDATION_VERTICAL_POSE_SEPARATION_DEGREES \
+                or down_change < MINIMUM_VALIDATION_VERTICAL_POSE_SEPARATION_DEGREES:
+            raise ValueError(
+                "numeric head-pitch orientation must be negative for up and positive for down"
+            )
+    if require_head_pitch and eligible_head_pose_sessions != len(expected_sessions):
+        raise ValueError("numeric head-pitch verification requires schema-2-or-newer sessions")
 
 
 def gaze_vectors(angles: np.ndarray) -> np.ndarray:
@@ -732,6 +1298,28 @@ def gaze_vectors(angles: np.ndarray) -> np.ndarray:
         (np.sin(yaw) * np.cos(pitch), np.sin(pitch), np.cos(yaw) * np.cos(pitch)),
         axis=1,
     )
+
+
+def native_degree_vectors(angles: torch.Tensor) -> torch.Tensor:
+    radians = torch.deg2rad(angles)
+    yaw = radians[:, 0]
+    pitch = radians[:, 1]
+    return torch.stack(
+        (
+            torch.sin(yaw) * torch.cos(pitch),
+            torch.sin(pitch),
+            torch.cos(yaw) * torch.cos(pitch),
+        ),
+        dim=1,
+    )
+
+
+def angular_cosine_loss(
+    predicted_degrees: torch.Tensor, expected_degrees: torch.Tensor,
+) -> torch.Tensor:
+    predicted = native_degree_vectors(predicted_degrees)
+    expected = native_degree_vectors(expected_degrees)
+    return (1 - torch.sum(predicted * expected, dim=1)).mean()
 
 
 def openvino_target_vectors(labels: torch.Tensor) -> torch.Tensor:
@@ -768,6 +1356,21 @@ def aggregate_angular_training_loss(
         tail_loss = torch.topk(per_sample_losses, tail_count).values.mean()
         return (1 - TAIL_LOSS_WEIGHT) * mean_loss + TAIL_LOSS_WEIGHT * tail_loss
     raise ValueError(f"unsupported pretrained loss formulation: {formulation}")
+
+
+def training_loss_configuration(
+    pretrained: bool, pretrained_formulation: str,
+) -> dict[str, float | str | None]:
+    if pretrained_formulation not in {"mean-angular", "tail-angular"}:
+        raise ValueError("unsupported pretrained loss formulation")
+    if not pretrained and pretrained_formulation != "mean-angular":
+        raise ValueError("pretrained loss formulation requires a pretrained model")
+    tail_weighted = pretrained and pretrained_formulation == "tail-angular"
+    return {
+        "formulation": "tail-angular-cosine" if tail_weighted else "angular-cosine",
+        "tail_fraction": TAIL_LOSS_FRACTION if tail_weighted else None,
+        "tail_weight": TAIL_LOSS_WEIGHT if tail_weighted else None,
+    }
 
 
 def angular_errors(predicted: np.ndarray, expected: np.ndarray) -> np.ndarray:
@@ -924,6 +1527,55 @@ def grouped_metrics(
     }
 
 
+def numeric_evidence_summary(values: Iterable[float]) -> dict[str, float | int]:
+    values = list(values)
+    if not values or not all(math.isfinite(value) for value in values):
+        raise ValueError("schema-4 diagnostic evidence is invalid")
+    return {
+        "count": len(values),
+        "minimum": min(values),
+        "median": statistics.median(values),
+        "maximum": max(values),
+    }
+
+
+def schema_four_quality_diagnostics(samples: list[Sample]) -> dict[str, object] | None:
+    if not samples or any(sample.schema_version != 4 for sample in samples):
+        return None
+    alignments = [sample.canonical_alignment for sample in samples]
+    if any(alignment is None for alignment in alignments):
+        raise ValueError("schema-4 diagnostic evidence is missing")
+    values = [alignment for alignment in alignments if alignment is not None]
+    pupil_source_pairs: dict[str, int] = {}
+    for alignment in values:
+        key = f"{alignment.left.pupil_source}+{alignment.right.pupil_source}"
+        pupil_source_pairs[key] = pupil_source_pairs.get(key, 0) + 1
+    return {
+        "crop_clipped_fraction": numeric_evidence_summary(
+            fraction
+            for alignment in values
+            for fraction in (
+                alignment.left.crop_clipped_fraction,
+                alignment.right.crop_clipped_fraction,
+            )
+        ),
+        "alignment_disagreement_degrees": numeric_evidence_summary(
+            alignment.disagreement_degrees for alignment in values
+        ),
+        "crop_side_pixels": numeric_evidence_summary(
+            alignment.crop_side_pixels for alignment in values
+        ),
+        "minimum_contour_point_count": numeric_evidence_summary(
+            float(min(
+                alignment.left.contour_point_count,
+                alignment.right.contour_point_count,
+            ))
+            for alignment in values
+        ),
+        "pupil_source_pair_counts": dict(sorted(pupil_source_pairs.items())),
+    }
+
+
 def diagnostic_breakdowns(
     model: nn.Module,
     samples: list[Sample],
@@ -946,6 +1598,7 @@ def diagnostic_breakdowns(
         predicted, expected, lens_mask = predict_degrees(
             model, loader, device, pretrained
         )
+        schema_four_quality = schema_four_quality_diagnostics(session_samples)
         result[session_id] = {
             "pose_block": grouped_metrics(
                 session_samples, predicted, expected, lens_mask,
@@ -990,7 +1643,12 @@ def diagnostic_breakdowns(
                 session_samples, predicted, expected, lens_mask,
                 lambda sample: bucket(sample.minimum_openness, openness_boundaries),
             ),
-            "unavailable_indicators": ["crop_clipping", "occlusion"],
+            "schema_four_quality": schema_four_quality,
+            "unavailable_indicators": (
+                ["occlusion_score"]
+                if schema_four_quality is not None
+                else ["crop_clipping", "alignment_quality", "occlusion"]
+            ),
         }
     return result
 
@@ -1314,7 +1972,6 @@ def train_model(
     scheduler = learning_rate_scheduler(
         optimiser, learning_rate_schedule, epochs, minimum_learning_rate
     )
-    loss_function = nn.SmoothL1Loss(beta=1.0)
     evaluated_epochs: list[EpochEvaluation] = []
     selected_state: dict[str, torch.Tensor] | None = None
 
@@ -1324,7 +1981,7 @@ def train_model(
         for left, right, pose, labels, _ in training_loader:
             optimiser.zero_grad(set_to_none=True)
             output = model(left.to(device), right.to(device), pose.to(device))
-            loss = loss_function(output, labels.to(device))
+            loss = angular_cosine_loss(output, labels.to(device))
             loss.backward()
             optimiser.step()
             losses.append(float(loss.detach().cpu()))
@@ -1597,6 +2254,14 @@ def sample_set_digest(samples: list[Sample]) -> str:
             "session_metadata_sha256": sample.session_metadata_sha256,
             "manifest_sha256": sample.manifest_sha256,
         }
+        if sample.schema_version == 4:
+            if sample.canonical_alignment is None:
+                raise ValueError("schema-4 sample is missing canonical alignment evidence")
+            record.update({
+                "input_contract": sample_input_contract(sample),
+                "label_contract_sha256": sample_label_contract_sha256(sample),
+                "canonical_alignment": asdict(sample.canonical_alignment),
+            })
         digest.update(json.dumps(record, sort_keys=True, separators=(",", ":")).encode())
         for path in (sample.left_path, sample.right_path):
             if path not in image_digests:
@@ -1792,7 +2457,7 @@ def load_checkpoint_model(
     checkpoint_path: Path, pretrained_onnx: Path | None
 ) -> tuple[nn.Module, dict, bool]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    if checkpoint.get("format_version") not in {1, 2, CHECKPOINT_FORMAT_VERSION}:
+    if checkpoint.get("format_version") not in SUPPORTED_CHECKPOINT_FORMAT_VERSIONS:
         raise ValueError("unsupported checkpoint format")
     architecture = checkpoint.get("architecture")
     if architecture == PRETRAINED_ARCHITECTURE:
@@ -1927,6 +2592,14 @@ def candidate_shared_contract(report: dict[str, object]) -> dict[str, object]:
         raise ValueError("candidate report shared contract is incomplete") from error
 
 
+def output_contract_for_architecture(architecture: object) -> str:
+    if architecture == NATIVE_ARCHITECTURE:
+        return "gaze_degrees"
+    if architecture == PRETRAINED_ARCHITECTURE:
+        return "gaze_vector"
+    raise ValueError("gaze architecture is unsupported")
+
+
 def validated_seed_run(report_path: Path) -> dict[str, object]:
     report_path = report_path.resolve()
     if report_path.name != "evaluation.json":
@@ -1934,6 +2607,10 @@ def validated_seed_run(report_path: Path) -> dict[str, object]:
     report = read_json_object(report_path, "candidate report")
     if report.get("schema_version") != CHECKPOINT_FORMAT_VERSION:
         raise ValueError("candidate reports must use the current checkpoint format")
+    if report.get("output_contract") != output_contract_for_architecture(
+        report.get("architecture")
+    ):
+        raise ValueError("candidate report output contract does not match its architecture")
     seed = report.get("seed")
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise ValueError("candidate report seed is invalid")
@@ -1952,6 +2629,10 @@ def validated_seed_run(report_path: Path) -> dict[str, object]:
     if report.get("trainer_sha256") != file_digest(Path(__file__).resolve()):
         raise ValueError("candidate report trainer differs from the current trainer")
     validated_filtering_config(report.get("filtering"))
+    validated_input_preprocessing(report.get("input_preprocessing"))
+    if validated_sha256(report.get("label_contract_sha256"), "label contract") \
+            != label_contract_digest():
+        raise ValueError("candidate report label contract is unsupported")
     for name in (
         "training_samples", "development_samples",
         "source_training_samples", "source_development_samples",
@@ -2029,6 +2710,7 @@ def validated_seed_run(report_path: Path) -> dict[str, object]:
         "training_epochs", "evaluation_interval", "selected_epoch", "seed",
         "evaluated_epochs", "selection", "batch_size", "trainable_parameters",
         "fine_tuning", "loss", "optimizer", "filtering", "augmentation",
+        "input_preprocessing", "label_contract_sha256",
         "software_versions", "trainer_sha256",
     )
     if any(checkpoint.get(name) != report.get(name) for name in mirrored_fields) \
@@ -2127,6 +2809,7 @@ def privacy_safe_shared_contract(shared: dict[str, object]) -> dict[str, object]
         "source_training_samples": shared["source_training_samples"],
         "source_development_samples": shared["source_development_samples"],
         "setup_sha256": shared["setup_sha256"],
+        "label_contract_sha256": shared["label_contract_sha256"],
         "completed_session_set_sha256": canonical_digest(
             sorted(shared["known_completed_sessions"])
         ),
@@ -2221,7 +2904,7 @@ def build_candidate_manifest_from_runs(
         if name != "completed_session_set_sha256"
     }
     candidate_identity_sha256 = canonical_digest({
-        "schema_version": 1,
+        "schema_version": CANDIDATE_MANIFEST_FORMAT_VERSION,
         "seeds": list(ROBUSTNESS_SEEDS),
         "primary_seed": PRIMARY_CANDIDATE_SEED,
         "shared_contract_sha256": canonical_digest(semantic_shared_contract),
@@ -2421,7 +3104,17 @@ def run_train(args: argparse.Namespace) -> int:
                 or source_validation_sessions != validation_sessions:
             raise ValueError("source and retained dataset roles differ")
         validate_pose_coverage(source_validation, source_validation_sessions)
+        validate_numeric_pitch_contract(
+            source_training, source_training_sessions, require_head_pitch=False
+        )
+        validate_numeric_pitch_contract(
+            source_validation, source_validation_sessions
+        )
     validate_pose_coverage(validation, validation_sessions)
+    validate_numeric_pitch_contract(
+        training, training_sessions, require_head_pitch=False
+    )
+    validate_numeric_pitch_contract(validation, validation_sessions)
     participants = training_participants | validation_participants
     if len(participants) != 1 or training_participants != validation_participants:
         raise ValueError(
@@ -2429,6 +3122,12 @@ def run_train(args: argparse.Namespace) -> int:
         )
     if set(training_sessions) & set(validation_sessions):
         raise ValueError("training and validation sessions overlap")
+    input_preprocessing = require_single_input_preprocessing(
+        source_training, source_validation, training, validation
+    )
+    label_contract_sha256 = require_single_label_contract(
+        source_training, source_validation, training, validation
+    )
     setup_sha256 = require_single_recording_setup(training, validation)
 
     pretrained = args.pretrained_onnx is not None
@@ -2482,7 +3181,7 @@ def run_train(args: argparse.Namespace) -> int:
         )
     model = outcome.model
     architecture = PRETRAINED_ARCHITECTURE if pretrained else NATIVE_ARCHITECTURE
-    output_contract = "gaze_vector" if pretrained else "gaze_degrees"
+    output_contract = output_contract_for_architecture(architecture)
     diagnostics_device = execution_device()
     model = model.to(diagnostics_device)
     diagnostics = diagnostic_breakdowns(
@@ -2492,6 +3191,8 @@ def run_train(args: argparse.Namespace) -> int:
     trainable_parameters = sum(parameter.numel() for parameter in model.parameters()
                                if parameter.requires_grad)
     total_parameters = sum(parameter.numel() for parameter in model.parameters())
+    if not pretrained and total_parameters != NATIVE_PARAMETER_COUNT:
+        raise RuntimeError("pinned native model parameter count changed")
     trainable_parameter_names = [
         name for name, parameter in model.named_parameters()
         if parameter.requires_grad
@@ -2502,15 +3203,7 @@ def run_train(args: argparse.Namespace) -> int:
         "total_parameters": total_parameters,
         "trainable_parameter_names": trainable_parameter_names,
     }
-    loss_configuration = {
-        "formulation": args.pretrained_loss if pretrained else "smooth-l1",
-        "tail_fraction": (
-            TAIL_LOSS_FRACTION if args.pretrained_loss == "tail-angular" else None
-        ),
-        "tail_weight": (
-            TAIL_LOSS_WEIGHT if args.pretrained_loss == "tail-angular" else None
-        ),
-    }
+    loss_configuration = training_loss_configuration(pretrained, args.pretrained_loss)
     optimiser = {
         "name": "AdamW",
         "learning_rate": learning_rate,
@@ -2581,6 +3274,8 @@ def run_train(args: argparse.Namespace) -> int:
         "optimizer": optimiser,
         "filtering": filtering,
         "augmentation": augmentation_config(args.augmentation_strength),
+        "input_preprocessing": input_preprocessing,
+        "label_contract_sha256": label_contract_sha256,
         "software_versions": versions,
         "trainer_sha256": trainer_sha256,
     }
@@ -2608,6 +3303,8 @@ def run_train(args: argparse.Namespace) -> int:
         "optimizer": optimiser,
         "filtering": filtering,
         "augmentation": augmentation_config(args.augmentation_strength),
+        "input_preprocessing": input_preprocessing,
+        "label_contract_sha256": label_contract_sha256,
         "software_versions": versions,
         "trainer_sha256": trainer_sha256,
         "frozen_at": frozen_at,
@@ -2701,6 +3398,7 @@ def run_evaluate(args: argparse.Namespace) -> int:
         minimum_face_confidence=minimum_face_confidence,
     )
     validate_pose_coverage(validation, validation_sessions)
+    validate_numeric_pitch_contract(validation, validation_sessions)
     training_sessions = checkpoint.get("training_sessions")
     if not isinstance(training_sessions, list) or not training_sessions:
         raise ValueError("checkpoint does not identify its training sessions")
@@ -2716,6 +3414,10 @@ def run_evaluate(args: argparse.Namespace) -> int:
         minimum_face_confidence=minimum_face_confidence,
     )
     validate_pose_coverage(development, loaded_development_sessions)
+    validate_numeric_pitch_contract(
+        training, loaded_training_sessions, require_head_pitch=False
+    )
+    validate_numeric_pitch_contract(development, loaded_development_sessions)
     if minimum_face_confidence == MINIMUM_FACE_CONFIDENCE:
         source_training = training
         source_development = development
@@ -2740,10 +3442,29 @@ def run_evaluate(args: argparse.Namespace) -> int:
                 or source_development_sessions != loaded_development_sessions:
             raise ValueError("source and retained dataset roles differ")
         validate_pose_coverage(source_development, source_development_sessions)
+        validate_numeric_pitch_contract(
+            source_training, source_training_sessions, require_head_pitch=False
+        )
+        validate_numeric_pitch_contract(
+            source_development, source_development_sessions
+        )
     if len(validation_participants) != 1 \
             or training_participants != validation_participants \
             or development_participants != validation_participants:
         raise ValueError("the personalized gate requires validation from the training participant")
+    input_preprocessing = require_single_input_preprocessing(
+        source_training, source_development, training, development, validation
+    )
+    frozen_input_preprocessing = validated_input_preprocessing(
+        checkpoint.get("input_preprocessing")
+    )
+    if frozen_input_preprocessing != input_preprocessing:
+        raise ValueError("final input preprocessing differs from the frozen checkpoint")
+    label_contract_sha256 = require_single_label_contract(
+        source_training, source_development, training, development, validation
+    )
+    if checkpoint.get("label_contract_sha256") != label_contract_sha256:
+        raise ValueError("final label contract differs from the frozen checkpoint")
     setup_sha256 = require_single_recording_setup(
         training, development, validation
     )
@@ -2835,6 +3556,8 @@ def run_evaluate(args: argparse.Namespace) -> int:
         "fine_tuning": checkpoint["fine_tuning"],
         "loss": checkpoint["loss"],
         "augmentation": checkpoint["augmentation"],
+        "input_preprocessing": input_preprocessing,
+        "label_contract_sha256": label_contract_sha256,
         "training_software_versions": checkpoint["software_versions"],
         "trainer_sha256": checkpoint["trainer_sha256"],
         "selected_epoch": checkpoint["selected_epoch"],

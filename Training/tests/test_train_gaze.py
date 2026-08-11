@@ -1,6 +1,8 @@
 import argparse
 import contextlib
 import csv
+from dataclasses import replace
+import hashlib
 import io
 import json
 import os
@@ -20,16 +22,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import train_gaze
 from train_gaze import (
     CANDIDATE_MANIFEST_FILENAME,
+    CANONICAL_CROP_CONTRACT,
+    CANONICAL_HEAD_POSE_CONTRACT,
+    CANONICAL_INPUT_CONTRACT,
+    CANONICAL_LABEL_CONTRACT,
+    CanonicalAlignmentEvidence,
+    CHECKPOINT_FORMAT_VERSION,
     Evaluation,
+    EyeQualityEvidence,
     FINAL_EVALUATION_FILENAME,
     GazeEstimator,
+    LEGACY_INPUT_CONTRACT,
     NATIVE_ARCHITECTURE,
+    NATIVE_PARAMETER_COUNT,
     POSE_PROMPTS,
     QualityGates,
     REQUIRED_COLUMNS,
+    SCHEMA_FOUR_COLUMNS,
     Sample,
     TARGETS_PER_POSE,
     aggregate_angular_training_loss,
+    angular_cosine_loss,
     angular_errors,
     augmentation_config,
     build_candidate_manifest,
@@ -40,6 +53,8 @@ from train_gaze import (
     filtering_config,
     gaze_vectors,
     is_pretrained_fusion_head_parameter,
+    input_preprocessing_contract,
+    label_contract_digest,
     learning_rate_scheduler,
     load_checkpoint_model,
     load_samples,
@@ -63,12 +78,15 @@ from train_gaze import (
     rgb_to_bgr,
     run_evaluate,
     sample_set_digest,
+    schema_four_quality_diagnostics,
     select_epoch,
     seed_everything,
     session_id_digest,
     snapshot_model_state,
     train_model,
+    training_loss_configuration,
     validate_pose_coverage,
+    validate_numeric_pitch_contract,
     validate_training_arguments,
     validated_completed_session_ledger,
     validated_filtering_config,
@@ -84,13 +102,13 @@ TEST_VALIDATION_HEAD_POSES = (
     (0.0, 0.0, 0.0),
     (8.0, 0.0, 0.0),
     (-8.0, 0.0, 0.0),
-    (0.0, 6.0, 0.0),
     (0.0, -6.0, 0.0),
+    (0.0, 6.0, 0.0),
 )
 
 
 def metadata(schema_version: int, split: str = "training") -> dict:
-    return {
+    value = {
         "schemaVersion": schema_version,
         "participantID": "participant",
         "sessionID": "session",
@@ -106,6 +124,15 @@ def metadata(schema_version: int, split: str = "training") -> dict:
         "createdAt": "2026-01-01T00:00:00Z",
         "completedAt": "2026-01-01T00:05:00Z",
     }
+    if schema_version == 4:
+        value.update({
+            "sourceImageWidth": 1280,
+            "sourceImageHeight": 720,
+            "cropContract": CANONICAL_CROP_CONTRACT,
+            "labelContract": CANONICAL_LABEL_CONTRACT,
+            "headPoseContract": CANONICAL_HEAD_POSE_CONTRACT,
+        })
+    return value
 
 
 def manifest_row(columns: list[str], sample_number: int,
@@ -128,13 +155,90 @@ def manifest_row(columns: list[str], sample_number: int,
         "target_yaw_deg": f"{target_yaw:.6f}",
         "target_pitch_deg": f"{target_pitch:.6f}",
         "pose_prompt": pose,
+        "head_yaw_deg": f"{TEST_VALIDATION_HEAD_POSES[target_id // 27][0]:.12f}",
+        "head_pitch_deg": f"{TEST_VALIDATION_HEAD_POSES[target_id // 27][1]:.12f}",
+        "head_roll_deg": f"{TEST_VALIDATION_HEAD_POSES[target_id // 27][2]:.12f}",
         "face_conf": "0.9",
         "open_l": "1",
         "open_r": "1",
         "left_image": "eye.png",
         "right_image": "eye.png",
     })
+    if schema_version == 4:
+        row.update({
+            "frame_id": str(sample_number),
+            "elapsed_s": f"{sample_number * 0.12:.12f}",
+            "contour_points_l": "8",
+            "contour_points_r": "8",
+            "pupil_source_l": "contourCentroid",
+            "pupil_source_r": "contourCentroid",
+            "pupil_points_l": "0",
+            "pupil_points_r": "0",
+            "axis_start_x_l": "0.250000000000",
+            "axis_start_y_l": "0.400000000000",
+            "axis_end_x_l": "0.350000000000",
+            "axis_end_y_l": "0.400000000000",
+            "axis_start_x_r": "0.650000000000",
+            "axis_start_y_r": "0.400000000000",
+            "axis_end_x_r": "0.750000000000",
+            "axis_end_y_r": "0.400000000000",
+            "alignment_rotation_deg": "0.000000000000",
+            "alignment_disagreement_deg": "0.000000000000",
+            "crop_side_px": "230.400000000000",
+            "crop_clipped_fraction_l": "0.000000000000",
+            "crop_clipped_fraction_r": "0.000000000000",
+        })
     return row
+
+
+def write_complete_session(root: Path, schema_version: int, split: str = "training",
+                           row_mutator=None, metadata_mutator=None) -> Path:
+    session = root / f"{split}-session"
+    session.mkdir()
+    Image.new("RGB", (60, 60)).save(session / "eye.png")
+    session_metadata = metadata(schema_version, split)
+    if metadata_mutator is not None:
+        metadata_mutator(session_metadata)
+    (session / "session.json").write_text(json.dumps(session_metadata))
+    columns = sorted(
+        REQUIRED_COLUMNS | (SCHEMA_FOUR_COLUMNS if schema_version == 4 else set())
+    )
+    with (session / "manifest.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        for sample_number in range(1, 811):
+            row = manifest_row(columns, sample_number, schema_version, split)
+            if row_mutator is not None:
+                row_mutator(row, sample_number)
+            writer.writerow(row)
+    return session
+
+
+def numeric_pitch_samples(
+    session_id: str, eye_path: Path, invert_head_pitch: bool = False,
+) -> list[Sample]:
+    samples = []
+    for target_id in range(len(POSE_PROMPTS) * TARGETS_PER_POSE):
+        kind, target_x, target_y, yaw, pitch, pose = expected_target_label(
+            "validation", target_id, TEST_DISPLAY_GEOMETRY
+        )
+        head_pose = TEST_VALIDATION_HEAD_POSES[target_id // TARGETS_PER_POSE]
+        if invert_head_pitch:
+            head_pose = (head_pose[0], -head_pose[1], head_pose[2])
+        samples.append(Sample(
+            session_id=session_id,
+            split="validation",
+            target_id=target_id,
+            target_kind=kind,
+            left_path=eye_path,
+            right_path=eye_path,
+            head_pose=head_pose,
+            gaze_degrees=(yaw, pitch),
+            pose_prompt=pose,
+            target_position=(target_x, target_y),
+            schema_version=3,
+        ))
+    return samples
 
 
 class AngularMetricTests(unittest.TestCase):
@@ -161,6 +265,42 @@ class AngularMetricTests(unittest.TestCase):
         predicted = np.array([[10.0, 0.0]])
         expected = np.array([[-5.0, 0.0]])
         np.testing.assert_allclose(angular_errors(predicted, expected), 15.0, atol=1e-6)
+
+    def test_native_training_loss_is_angular_cosine_in_degree_output_space(self):
+        expected = torch.tensor([[0.0, 0.0], [10.0, -5.0]])
+
+        identical = angular_cosine_loss(expected, expected)
+        displaced = angular_cosine_loss(expected + 10.0, expected)
+
+        self.assertAlmostEqual(identical.item(), 0.0, places=7)
+        self.assertGreater(displaced.item(), identical.item())
+
+    def test_loss_provenance_names_the_angular_cosine_objective(self):
+        expected = {
+            "formulation": "angular-cosine",
+            "tail_fraction": None,
+            "tail_weight": None,
+        }
+
+        self.assertEqual(training_loss_configuration(False, "mean-angular"), expected)
+        self.assertEqual(training_loss_configuration(True, "mean-angular"), expected)
+        self.assertEqual(
+            training_loss_configuration(True, "tail-angular"),
+            {
+                "formulation": "tail-angular-cosine",
+                "tail_fraction": train_gaze.TAIL_LOSS_FRACTION,
+                "tail_weight": train_gaze.TAIL_LOSS_WEIGHT,
+            },
+        )
+
+    def test_native_compact_architecture_keeps_the_frozen_parameter_count(self):
+        model = GazeEstimator()
+
+        self.assertEqual(
+            sum(parameter.numel() for parameter in model.parameters()),
+            NATIVE_PARAMETER_COUNT,
+        )
+        self.assertEqual(NATIVE_PARAMETER_COUNT, 156_226)
 
     def test_gaze_vectors_are_unit_length(self):
         angles = np.array([[0.0, 0.0], [20.0, -15.0], [-8.0, 12.0]])
@@ -230,6 +370,33 @@ class AngularMetricTests(unittest.TestCase):
         self.assertEqual(gaze, (-8.0, -6.0))
 
 class DatasetLoadingTests(unittest.TestCase):
+    def test_schema_four_quality_diagnostics_report_raw_evidence_without_thresholds(self):
+        left = EyeQualityEvidence(8, "visionLandmark", 1, (0.1, 0.2), (0.2, 0.2), 0.0)
+        right = EyeQualityEvidence(7, "contourCentroid", 0, (0.7, 0.2), (0.8, 0.2), 0.1)
+        alignment = CanonicalAlignmentEvidence(
+            (1280, 720), left, right, 2.0, 4.0, 120.0,
+        )
+        sample = Sample(
+            session_id="session", split="training", target_id=0, target_kind="lens",
+            left_path=Path("left.png"), right_path=Path("right.png"),
+            head_pose=(0, 0, 0), gaze_degrees=(0, 0), schema_version=4,
+            canonical_alignment=alignment,
+        )
+
+        diagnostics = schema_four_quality_diagnostics([sample])
+
+        self.assertIsNotNone(diagnostics)
+        assert diagnostics is not None
+        self.assertEqual(
+            diagnostics["crop_clipped_fraction"],
+            {"count": 2, "minimum": 0.0, "median": 0.05, "maximum": 0.1},
+        )
+        self.assertEqual(diagnostics["alignment_disagreement_degrees"]["median"], 4.0)
+        self.assertEqual(
+            diagnostics["pupil_source_pair_counts"],
+            {"visionLandmark+contourCentroid": 1},
+        )
+
     def test_loads_only_a_complete_finished_session(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -254,6 +421,128 @@ class DatasetLoadingTests(unittest.TestCase):
             self.assertEqual(len(samples[0].setup_binding), 64)
             self.assertEqual(len(samples[0].session_metadata_sha256), 64)
             self.assertEqual(len(samples[0].manifest_sha256), 64)
+
+    def test_schema_four_loads_only_the_frozen_canonical_contract(self):
+        self.assertEqual(len(REQUIRED_COLUMNS | SCHEMA_FOUR_COLUMNS), 41)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_complete_session(root, 4)
+
+            samples, _, _ = load_samples(root, "training")
+
+            self.assertEqual(len(samples), 810)
+            self.assertEqual(samples[0].input_contract, CANONICAL_INPUT_CONTRACT)
+            self.assertEqual(
+                samples[0].label_contract_sha256, label_contract_digest()
+            )
+            evidence = samples[0].canonical_alignment
+            self.assertIsNotNone(evidence)
+            assert evidence is not None
+            self.assertEqual(evidence.source_image_size, (1280, 720))
+            self.assertEqual(evidence.crop_side_pixels, 230.4)
+            changed = replace(
+                samples[0],
+                canonical_alignment=replace(evidence, crop_side_pixels=230.5),
+            )
+            self.assertNotEqual(
+                sample_set_digest([samples[0]]), sample_set_digest([changed])
+            )
+
+    def test_schema_four_rejects_missing_head_pose_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_complete_session(
+                root,
+                4,
+                metadata_mutator=lambda value: value.pop("headPoseContract"),
+            )
+
+            with self.assertRaisesRegex(ValueError, "head-pose contract"):
+                load_samples(root, "training")
+
+    def test_schema_four_rejects_tampered_derived_alignment(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+
+            def tamper(row, sample_number):
+                if sample_number == 1:
+                    row["alignment_rotation_deg"] = "1.000000000000"
+
+            write_complete_session(root, 4, row_mutator=tamper)
+
+            with self.assertRaisesRegex(ValueError, "derived alignment evidence"):
+                load_samples(root, "training")
+
+    def test_schema_four_accepts_finite_out_of_frame_axes_with_recomputed_clipping(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+
+            def cross_frame_boundary(row, sample_number):
+                if sample_number == 1:
+                    row["axis_start_x_l"] = "-0.050000000000"
+                    row["axis_end_x_l"] = "0.050000000000"
+                    row["crop_clipped_fraction_l"] = "0.500000000000"
+
+            write_complete_session(root, 4, row_mutator=cross_frame_boundary)
+
+            samples, _, _ = load_samples(root, "training")
+
+            evidence = samples[0].canonical_alignment
+            self.assertIsNotNone(evidence)
+            assert evidence is not None
+            self.assertEqual(evidence.left.axis_start[0], -0.05)
+            self.assertEqual(evidence.left.crop_clipped_fraction, 0.5)
+
+    def test_schema_four_rejects_tracking_quality_outside_unit_range(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+
+            def tamper(row, sample_number):
+                if sample_number == 1:
+                    row["open_l"] = "1.01"
+
+            write_complete_session(root, 4, row_mutator=tamper)
+
+            with self.assertRaisesRegex(ValueError, "tracking quality"):
+                load_samples(root, "training")
+
+    def test_schema_four_rejects_duplicate_headers_and_surplus_row_fields(self):
+        for mutation in ("duplicate-header", "surplus-row-field"):
+            with self.subTest(mutation=mutation):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    session = write_complete_session(root, 4)
+                    manifest = session / "manifest.csv"
+                    lines = manifest.read_text().splitlines()
+                    if mutation == "duplicate-header":
+                        lines[0] += ",schema_version"
+                        lines[1] += ",4"
+                    else:
+                        lines[1] += ",unexpected"
+                    manifest.write_text("\n".join(lines) + "\n")
+
+                    with self.assertRaisesRegex(ValueError, "frozen contract"):
+                        load_samples(root, "training")
+
+    def test_schema_four_rejects_negative_and_nonincreasing_elapsed_time(self):
+        for first, second, message in (
+            ("-0.100000000000", None, "elapsed time is invalid"),
+            ("0.120000000000", "0.120000000000", "not strictly increasing"),
+        ):
+            with self.subTest(message=message):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+
+                    def tamper(row, sample_number):
+                        if sample_number == 1:
+                            row["elapsed_s"] = first
+                        elif sample_number == 2 and second is not None:
+                            row["elapsed_s"] = second
+
+                    write_complete_session(root, 4, row_mutator=tamper)
+
+                    with self.assertRaisesRegex(ValueError, message):
+                        load_samples(root, "training")
 
     def test_excludes_legacy_lens_samples_recorded_before_pose_settling(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -386,6 +675,27 @@ class DatasetLoadingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not separate"):
             validate_pose_coverage(samples, ["session"])
 
+    def test_numeric_pitch_contract_rejects_one_inverted_session(self):
+        samples = numeric_pitch_samples("first", Path("eye.png"))
+        samples.extend(numeric_pitch_samples(
+            "second", Path("eye.png"), invert_head_pitch=True
+        ))
+
+        with self.assertRaisesRegex(ValueError, "negative for up and positive for down"):
+            validate_numeric_pitch_contract(samples, ["first", "second"])
+
+    def test_numeric_pitch_contract_rejects_nonmonotonic_screen_labels(self):
+        samples = numeric_pitch_samples("session", Path("eye.png"))
+        samples = [
+            replace(sample, gaze_degrees=(sample.gaze_degrees[0], -0.1))
+            if sample.target_kind == "screen" and sample.target_position[1] == 0.9
+            else sample
+            for sample in samples
+        ]
+
+        with self.assertRaisesRegex(ValueError, "not monotonic"):
+            validate_numeric_pitch_contract(samples, ["session"])
+
     def test_validation_does_not_drop_a_fully_filtered_session(self):
         samples = [
             Sample(
@@ -500,6 +810,60 @@ class DatasetLoadingTests(unittest.TestCase):
             second = Sample(**common, participant_binding="second")
 
             self.assertNotEqual(sample_set_digest([first]), sample_set_digest([second]))
+
+    def test_schema_three_digest_keeps_the_legacy_record_shape(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            eye_path = Path(temporary_directory) / "eye.png"
+            Image.new("RGB", (60, 60)).save(eye_path)
+            sample = Sample(
+                session_id="session",
+                split="training",
+                target_id=0,
+                target_kind="lens",
+                left_path=eye_path,
+                right_path=eye_path,
+                head_pose=(1, 2, 3),
+                gaze_degrees=(4, 5),
+                pose_prompt="neutral",
+                target_position=(0.5, 0),
+                face_confidence=0.9,
+                minimum_openness=0.8,
+                schema_version=3,
+                participant_binding="participant",
+                setup_binding="setup",
+                session_created_at="created",
+                session_metadata_sha256="metadata",
+                manifest_sha256="manifest",
+                input_contract="must-not-enter-a-legacy-digest",
+                label_contract_sha256="must-not-enter-a-legacy-digest",
+            )
+            record = {
+                "session_id": sample.session_id,
+                "target_id": sample.target_id,
+                "target_kind": sample.target_kind,
+                "head_pose": sample.head_pose,
+                "gaze_degrees": sample.gaze_degrees,
+                "pose_prompt": sample.pose_prompt,
+                "target_position": sample.target_position,
+                "face_confidence": sample.face_confidence,
+                "minimum_openness": sample.minimum_openness,
+                "schema_version": sample.schema_version,
+                "participant_binding": sample.participant_binding,
+                "setup_binding": sample.setup_binding,
+                "session_created_at": sample.session_created_at,
+                "session_metadata_sha256": sample.session_metadata_sha256,
+                "manifest_sha256": sample.manifest_sha256,
+            }
+            expected = hashlib.sha256()
+            expected.update(json.dumps(
+                record, sort_keys=True, separators=(",", ":")
+            ).encode())
+            image_sha256 = file_digest(eye_path)
+            for _ in range(2):
+                expected.update(eye_path.name.encode())
+                expected.update(image_sha256.encode())
+
+            self.assertEqual(sample_set_digest([sample]), expected.hexdigest())
 
 
 class CheckpointSelectionTests(unittest.TestCase):
@@ -940,6 +1304,7 @@ class CandidateManifestTests(unittest.TestCase):
         minimum_face_confidence: float = 0.70,
         training_samples: int = 810,
         development_samples: int = 1_000,
+        input_contract: str = LEGACY_INPUT_CONTRACT,
     ) -> Path:
         output = root / name
         output.mkdir()
@@ -988,8 +1353,9 @@ class CandidateManifestTests(unittest.TestCase):
             "minimum_learning_rate": None, "scheduler_step_unit": None,
         }
         fine_tuning = {
-            "scope": "all", "trainable_parameters": 156_226,
-            "total_parameters": 156_226, "trainable_parameter_names": ["weight"],
+            "scope": "all", "trainable_parameters": NATIVE_PARAMETER_COUNT,
+            "total_parameters": NATIVE_PARAMETER_COUNT,
+            "trainable_parameter_names": ["weight"],
         }
         shared = {
             "architecture": NATIVE_ARCHITECTURE,
@@ -1017,24 +1383,23 @@ class CandidateManifestTests(unittest.TestCase):
             "seed": seed,
             "batch_size": 64,
             "fine_tuning": fine_tuning,
-            "loss": {
-                "formulation": "mean-angular",
-                "tail_fraction": None, "tail_weight": None,
-            },
+            "loss": training_loss_configuration(False, "mean-angular"),
             "optimizer": optimizer,
             "filtering": filtering_config(minimum_face_confidence),
             "augmentation": augmentation_config(augmentation_strength),
+            "input_preprocessing": input_preprocessing_contract(input_contract),
+            "label_contract_sha256": label_contract_digest(),
             "software_versions": train_gaze.software_versions(
                 train_gaze.execution_device()
             ),
             "trainer_sha256": file_digest(Path(train_gaze.__file__).resolve()),
         }
         checkpoint = {
-            "format_version": 3,
+            "format_version": CHECKPOINT_FORMAT_VERSION,
             "model_state": model.state_dict(),
             "model_sha256": model_sha256,
             "validation_sessions": shared["development_sessions"],
-            "trainable_parameters": 156_226,
+            "trainable_parameters": NATIVE_PARAMETER_COUNT,
             "selection": selection,
             "evaluated_epochs": [selection],
             "quality_gates": quality_gates().__dict__,
@@ -1045,11 +1410,11 @@ class CandidateManifestTests(unittest.TestCase):
         checkpoint_path = output / "GazeEstimator.pt"
         torch.save(checkpoint, checkpoint_path)
         report = {
-            "schema_version": 3,
+            "schema_version": CHECKPOINT_FORMAT_VERSION,
             "output_contract": "gaze_degrees",
             "checkpoint_sha256": file_digest(checkpoint_path),
             "model_sha256": model_sha256,
-            "trainable_parameters": 156_226,
+            "trainable_parameters": NATIVE_PARAMETER_COUNT,
             "session_evaluations": session_evaluations,
             "selection": selection,
             "evaluated_epochs": [selection],
@@ -1100,6 +1465,7 @@ class CandidateManifestTests(unittest.TestCase):
                 checkpoint, file_digest(checkpoint), file_digest(output)
             )
 
+            self.assertEqual(manifest["schema_version"], 2)
             self.assertTrue(actual["robustness"]["passed"])
             self.assertEqual(actual["primary_seed"], 7)
             self.assertNotIn("private-training", output.read_text())
@@ -1110,6 +1476,56 @@ class CandidateManifestTests(unittest.TestCase):
                     file_digest(wrong_checkpoint),
                     file_digest(output),
                 )
+
+    def test_manifest_treats_input_preprocessing_as_one_major_factor(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            seeds = (7, 19, 43)
+            candidate = [
+                self.write_run(
+                    root,
+                    f"candidate-{seed}",
+                    seed,
+                    score,
+                    "baseline",
+                    input_contract=CANONICAL_INPUT_CONTRACT,
+                )
+                for seed, score in zip(seeds, (0.70, 0.72, 0.74))
+            ]
+            baseline = [
+                self.write_run(
+                    root,
+                    f"baseline-{seed}",
+                    seed,
+                    score,
+                    "baseline",
+                    input_contract=LEGACY_INPUT_CONTRACT,
+                )
+                for seed, score in zip(seeds, (0.80, 0.82, 0.84))
+            ]
+
+            manifest = build_candidate_manifest(
+                candidate,
+                baseline,
+                "input",
+                self.completed_hashes(),
+                candidate[0].with_name(CANDIDATE_MANIFEST_FILENAME),
+                "2026-01-02T00:00:00+00:00",
+            )
+
+            self.assertEqual(manifest["changed_factor"], "input")
+
+    def test_candidate_report_output_contract_must_match_the_checkpoint_architecture(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            report_path = self.write_run(
+                Path(temporary_directory), "candidate", 7, 0.70, "baseline"
+            )
+            report = json.loads(report_path.read_text())
+            report["output_contract"] = "gaze_vector"
+            report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+
+            with self.assertRaisesRegex(ValueError, "output contract"):
+                train_gaze.validated_seed_run(report_path)
 
     def test_candidate_identity_ignores_paths_timestamps_and_final_attempts(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1375,19 +1791,27 @@ class CheckpointLoadingTests(unittest.TestCase):
     ) -> list[Sample]:
         samples = []
         for pose in range(5):
-            for target_position, count, kind in (
-                (0, 6, "lens"), (26, 6, "lens"), (1, 88, "screen")
-            ):
+            target_counts = [(0, 6), (26, 6)] + [
+                (position, 4 if position <= 13 else 3)
+                for position in range(1, 26)
+            ]
+            for target_position, count in target_counts:
+                target_id = pose * TARGETS_PER_POSE + target_position
+                kind, target_x, target_y, yaw, pitch, prompt = expected_target_label(
+                    "validation", target_id, TEST_DISPLAY_GEOMETRY
+                )
                 samples.extend(
                     Sample(
                         session_id=session_id,
                         split="validation",
-                        target_id=pose * TARGETS_PER_POSE + target_position,
+                        target_id=target_id,
                         target_kind=kind,
                         left_path=eye_path,
                         right_path=eye_path,
                         head_pose=TEST_VALIDATION_HEAD_POSES[pose],
-                        gaze_degrees=(0, 0),
+                        gaze_degrees=(yaw, pitch),
+                        pose_prompt=prompt,
+                        target_position=(target_x, target_y),
                         schema_version=3,
                         participant_binding="participant-binding",
                         setup_binding="setup-binding",
@@ -1399,7 +1823,7 @@ class CheckpointLoadingTests(unittest.TestCase):
                 )
         return samples
 
-    def test_version_three_evaluator_writes_one_immutable_final_report(self):
+    def test_version_four_evaluator_writes_one_immutable_final_report(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             eye_path = root / "eye.png"
@@ -1414,7 +1838,7 @@ class CheckpointLoadingTests(unittest.TestCase):
             model = GazeEstimator().eval()
             seed_everything(7)
             checkpoint_payload = {
-                "format_version": 3,
+                "format_version": CHECKPOINT_FORMAT_VERSION,
                 "architecture": NATIVE_ARCHITECTURE,
                 "model_state": model.state_dict(),
                 "model_sha256": model_digest(model),
@@ -1453,6 +1877,10 @@ class CheckpointLoadingTests(unittest.TestCase):
                 "fine_tuning": {},
                 "loss": {},
                 "augmentation": augmentation_config("baseline"),
+                "input_preprocessing": input_preprocessing_contract(
+                    LEGACY_INPUT_CONTRACT
+                ),
+                "label_contract_sha256": label_contract_digest(),
                 "selected_epoch": 1,
                 "selection": {},
                 "evaluated_epochs": [],
@@ -1517,6 +1945,11 @@ class CheckpointLoadingTests(unittest.TestCase):
             report = json.loads(output_path.read_text())
             self.assertTrue(report["gates"]["passed"])
             self.assertEqual(report["validation_sessions"], ["final"])
+            self.assertEqual(
+                report["input_preprocessing"],
+                input_preprocessing_contract(LEGACY_INPUT_CONTRACT),
+            )
+            self.assertEqual(report["label_contract_sha256"], label_contract_digest())
             ledger = json.loads(
                 (ledger_root / train_gaze.FINAL_EVALUATION_LEDGER_FILENAME).read_text()
             )
@@ -1545,30 +1978,38 @@ class CheckpointLoadingTests(unittest.TestCase):
                 pretrained_onnx=None,
             )
 
-            with self.assertRaisesRegex(ValueError, "version-3 frozen checkpoint"):
+            with self.assertRaisesRegex(ValueError, "version-4 frozen checkpoint"):
                 run_evaluate(args)
 
     def test_loads_a_frozen_native_checkpoint_without_changing_its_weights(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
-            checkpoint_path = Path(temporary_directory) / "GazeEstimator.pt"
             model = GazeEstimator().eval()
             digest = model_digest(model)
-            torch.save(
-                {
-                    "format_version": 1,
-                    "architecture": NATIVE_ARCHITECTURE,
-                    "model_state": model.state_dict(),
-                    "model_sha256": digest,
-                    "training_sessions": ["training-session"],
-                },
-                checkpoint_path,
-            )
+            for format_version in (1, 2, 3):
+                with self.subTest(format_version=format_version):
+                    checkpoint_path = (
+                        Path(temporary_directory) / f"GazeEstimator-{format_version}.pt"
+                    )
+                    torch.save(
+                        {
+                            "format_version": format_version,
+                            "architecture": NATIVE_ARCHITECTURE,
+                            "model_state": model.state_dict(),
+                            "model_sha256": digest,
+                            "training_sessions": ["training-session"],
+                        },
+                        checkpoint_path,
+                    )
 
-            loaded, checkpoint, pretrained = load_checkpoint_model(checkpoint_path, None)
+                    loaded, checkpoint, pretrained = load_checkpoint_model(
+                        checkpoint_path, None
+                    )
 
-            self.assertFalse(pretrained)
-            self.assertEqual(checkpoint["training_sessions"], ["training-session"])
-            self.assertEqual(model_digest(loaded), digest)
+                    self.assertFalse(pretrained)
+                    self.assertEqual(
+                        checkpoint["training_sessions"], ["training-session"]
+                    )
+                    self.assertEqual(model_digest(loaded), digest)
 
     def test_rejects_a_checkpoint_with_a_mismatched_model_checksum(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
