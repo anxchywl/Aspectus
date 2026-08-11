@@ -42,6 +42,12 @@ OPENVINO_MODEL_SHA256 = "f8f13707401547c7c5e146ba22da1bd6ada00f47ebf347be6d97c5a
 MINIMUM_FACE_CONFIDENCE = 0.70
 MINIMUM_OPENNESS = 0.40
 MAXIMUM_ABSOLUTE_HEAD_ROLL_DEGREES = 20.0
+# Inter-eye axis disagreement is the reliability signal for the contour-derived alignment: the
+# shared rotation is a circular mean of both axes, so when they disagree the rotation applied to
+# both crops comes from contours that do not agree with each other. The floor is inert by default
+# because choosing a threshold from the one measured session would be outcome-driven tuning; it is
+# exposed as a single declared factor to be screened like any other.
+MAXIMUM_EYE_AXIS_DISAGREEMENT_DEGREES = 180.0
 MINIMUM_VALIDATION_SAMPLES_PER_POSE = 100
 MINIMUM_VALIDATION_LENS_SAMPLES = 50
 MINIMUM_VALIDATION_LENS_SAMPLES_PER_POSE = 6
@@ -1034,6 +1040,9 @@ def load_samples(
     split: str,
     selected_session_ids: set[str] | None = None,
     minimum_face_confidence: float = MINIMUM_FACE_CONFIDENCE,
+    maximum_eye_axis_disagreement_degrees: float = (
+        MAXIMUM_EYE_AXIS_DISAGREEMENT_DEGREES
+    ),
 ) -> tuple[list[Sample], set[str], list[str]]:
     samples: list[Sample] = []
     participants: set[str] = set()
@@ -1180,6 +1189,17 @@ def load_samples(
                     or right_openness < MINIMUM_OPENNESS \
                     or abs(head_roll) > MAXIMUM_ABSOLUTE_HEAD_ROLL_DEGREES:
                 continue
+            if maximum_eye_axis_disagreement_degrees \
+                    < MAXIMUM_EYE_AXIS_DISAGREEMENT_DEGREES:
+                # legacy schemas never recorded the axes, so the declared factor cannot be
+                # applied to part of a run without silently meaning different things per session
+                if canonical_alignment is None:
+                    raise ValueError(
+                        "eye-axis disagreement filtering requires canonical alignment evidence"
+                    )
+                if canonical_alignment.disagreement_degrees \
+                        > maximum_eye_axis_disagreement_degrees:
+                    continue
             samples.append(
                 Sample(
                     session_id=session_id,
@@ -2419,11 +2439,17 @@ def sample_set_digest(samples: list[Sample]) -> str:
 
 def filtering_config(
     minimum_face_confidence: float = MINIMUM_FACE_CONFIDENCE,
+    maximum_eye_axis_disagreement_degrees: float = (
+        MAXIMUM_EYE_AXIS_DISAGREEMENT_DEGREES
+    ),
 ) -> dict[str, float]:
     return {
         "minimum_face_confidence": minimum_face_confidence,
         "minimum_openness": MINIMUM_OPENNESS,
         "maximum_absolute_head_roll_degrees": MAXIMUM_ABSOLUTE_HEAD_ROLL_DEGREES,
+        "maximum_eye_axis_disagreement_degrees": (
+            maximum_eye_axis_disagreement_degrees
+        ),
         "minimum_validation_samples_per_pose": MINIMUM_VALIDATION_SAMPLES_PER_POSE,
         "minimum_validation_lens_samples": MINIMUM_VALIDATION_LENS_SAMPLES,
         "minimum_validation_lens_samples_per_pose": (
@@ -2450,7 +2476,15 @@ def validated_filtering_config(value: object) -> dict[str, float]:
             or not math.isfinite(minimum_face_confidence) \
             or not MINIMUM_FACE_CONFIDENCE <= minimum_face_confidence <= 1:
         raise ValueError("frozen checkpoint face-confidence filter is invalid")
-    expected = filtering_config(float(minimum_face_confidence))
+    disagreement = value.get("maximum_eye_axis_disagreement_degrees")
+    if isinstance(disagreement, bool) \
+            or not isinstance(disagreement, (int, float)) \
+            or not math.isfinite(disagreement) \
+            or not 0 < disagreement <= MAXIMUM_EYE_AXIS_DISAGREEMENT_DEGREES:
+        raise ValueError("frozen checkpoint eye-axis disagreement filter is invalid")
+    expected = filtering_config(
+        float(minimum_face_confidence), float(disagreement)
+    )
     if value != expected:
         raise ValueError("frozen checkpoint filtering configuration mismatch")
     return expected
@@ -3205,6 +3239,13 @@ def validate_training_arguments(args: argparse.Namespace) -> None:
         raise ValueError(
             f"minimum face confidence must be between {MINIMUM_FACE_CONFIDENCE} and one"
         )
+    if not math.isfinite(args.maximum_eye_axis_disagreement) \
+            or not 0 < args.maximum_eye_axis_disagreement \
+            <= MAXIMUM_EYE_AXIS_DISAGREEMENT_DEGREES:
+        raise ValueError(
+            "maximum eye-axis disagreement must be between zero and "
+            f"{MAXIMUM_EYE_AXIS_DISAGREEMENT_DEGREES} degrees"
+        )
     if args.learning_rate is not None \
             and (not math.isfinite(args.learning_rate) or args.learning_rate <= 0):
         raise ValueError("learning rate must be finite and positive")
@@ -3221,12 +3262,18 @@ def run_train(args: argparse.Namespace) -> int:
     training, training_participants, training_sessions = load_samples(
         args.data, "training", training_ids,
         minimum_face_confidence=args.minimum_face_confidence,
+        maximum_eye_axis_disagreement_degrees=args.maximum_eye_axis_disagreement,
     )
     validation, validation_participants, validation_sessions = load_samples(
         args.data, "validation", validation_ids,
         minimum_face_confidence=args.minimum_face_confidence,
+        maximum_eye_axis_disagreement_degrees=args.maximum_eye_axis_disagreement,
     )
-    if args.minimum_face_confidence == MINIMUM_FACE_CONFIDENCE:
+    # any tightened filter binds a common source dataset at the floor, so only the retained
+    # subset may differ as a consequence of the declared factor
+    if args.minimum_face_confidence == MINIMUM_FACE_CONFIDENCE \
+            and args.maximum_eye_axis_disagreement \
+            == MAXIMUM_EYE_AXIS_DISAGREEMENT_DEGREES:
         source_training = training
         source_validation = validation
     else:
@@ -3378,7 +3425,9 @@ def run_train(args: argparse.Namespace) -> int:
         gate_passes(evaluation, gates)
         for evaluation in outcome.selected_session_evaluations.values()
     )
-    filtering = filtering_config(args.minimum_face_confidence)
+    filtering = filtering_config(
+        args.minimum_face_confidence, args.maximum_eye_axis_disagreement
+    )
     known_completed_sessions = require_stable_completed_session_ledger(
         initial_completed_sessions, finished_session_ids(args.data)
     )
@@ -3845,6 +3894,12 @@ def parser() -> argparse.ArgumentParser:
     train.add_argument("--weight-decay", type=float, default=DEFAULT_WEIGHT_DECAY)
     train.add_argument(
         "--minimum-face-confidence", type=float, default=MINIMUM_FACE_CONFIDENCE
+    )
+    train.add_argument(
+        "--maximum-eye-axis-disagreement", type=float,
+        default=MAXIMUM_EYE_AXIS_DISAGREEMENT_DEGREES,
+        help="discard samples whose paired eye axes disagree by more than this many degrees; "
+             "requires canonical alignment evidence"
     )
     train.add_argument(
         "--augmentation-strength",

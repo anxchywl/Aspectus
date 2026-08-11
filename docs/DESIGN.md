@@ -387,12 +387,24 @@ declared sign rather than a per-session latch, and the loader re-checks the reco
 against it, so a session that records the inverted convention fails validation loudly instead of
 becoming silently unusable evidence the way the pitch session did.
 
-The remaining collection-plan question is contour reliability. Inter-eye axis disagreement is
+Contour reliability is the other axis of the redesign. Inter-eye axis disagreement is
 pose-structured and largest where the lid collapses the contour — median 2.9°/3.3° in the turned
 blocks against 13.6°/16.7° in lookDown/lookUp — and since the shared rotation is a circular mean of
-both axes, the vertical blocks are rotated using the least reliable contours in the session.
-Disagreement is already recorded and is a usable reliability gate; eye openness is not a substitute
-for it (r = +0.04, against r = +0.75 for `|head pitch|`). No such gate is implemented yet.
+both axes, the vertical blocks are rotated using the least reliable contours in the session. Eye
+openness is not a substitute for it (r = +0.04, against r = +0.75 for `|head pitch|`).
+
+`--maximum-eye-axis-disagreement` now exposes that as a declared filtering factor, bound into the
+checkpoint alongside the confidence, openness and roll filters, and requiring a common source
+dataset at the floor exactly as a tightened confidence threshold does. It refuses outright on
+schemas that never recorded the axes, so the factor cannot silently apply to part of a run.
+
+Its default is inert, and deliberately so: no threshold is defensible from the one measured
+session, and picking one from that session's numbers would be the outcome-driven tuning the
+protocol forbids. The measured cost of tightening it there is steep and very non-linear — 99.4% of
+rows survive at 20° and 91.7% at 18°, but 15° leaves the `lookUp` block with 22 of 162 rows and
+anything at or below 12° empties that block entirely. Coverage validation catches a gutted block
+below 100 retained rows per pose, though only for sessions carrying a development or validation
+role. Anyone screening this factor should read the per-pose retention before the aggregate.
 
 If the pitch contract is resolved, any compact comparison must be predeclared, use only cleared
 first-party data and random initialization, preserve the fixed session roles and exact gates, and

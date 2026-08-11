@@ -5,6 +5,7 @@ from dataclasses import replace
 import hashlib
 import io
 import json
+import math
 import os
 import stat
 import sys
@@ -37,6 +38,7 @@ from train_gaze import (
     FINAL_EVALUATION_FILENAME,
     GazeEstimator,
     LEGACY_INPUT_CONTRACT,
+    MAXIMUM_EYE_AXIS_DISAGREEMENT_DEGREES,
     NATIVE_ARCHITECTURE,
     NATIVE_PARAMETER_COUNT,
     POSE_PROMPTS,
@@ -539,6 +541,74 @@ class DatasetLoadingTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "head-pose contract"):
                 load_samples(root, "training")
+
+    def test_eye_axis_disagreement_filtering_is_inert_by_default(self):
+        # the default must retain every row, so the factor only ever acts when declared
+        self.assertEqual(
+            filtering_config()["maximum_eye_axis_disagreement_degrees"],
+            MAXIMUM_EYE_AXIS_DISAGREEMENT_DEGREES,
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_complete_session(root, 5, row_mutator=self._tilted_right_eye)
+
+            retained, _, _ = load_samples(root, "training")
+
+            self.assertEqual(len(retained), plan_size(5)[1])
+
+    @staticmethod
+    def _tilted_right_eye(row, sample_number):
+        # rotate the right eye axis by 30 degrees for the first pose block only, so those rows
+        # carry a large paired-eye disagreement and the rest stay at zero
+        if sample_number > TARGETS_PER_POSE * 6:
+            return
+        length = 0.1 * math.cos(math.radians(30))
+        row["axis_end_x_r"] = f"{0.65 + length:.12f}"
+        row["axis_end_y_r"] = f"{0.4 + 0.1 * math.sin(math.radians(30)) * 1280 / 720:.12f}"
+        row["alignment_rotation_deg"] = "15.000000000000"
+        row["alignment_disagreement_deg"] = "30.000000000000"
+        row["crop_side_px_r"] = "230.400000000000"
+
+    def test_eye_axis_disagreement_filtering_discards_only_the_unreliable_rows(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_complete_session(root, 5, row_mutator=self._tilted_right_eye)
+
+            retained, _, _ = load_samples(
+                root, "training", maximum_eye_axis_disagreement_degrees=20.0
+            )
+
+            # exactly the tilted first pose block is gone; every other block is untouched
+            self.assertEqual(len(retained), plan_size(5)[1] - TARGETS_PER_POSE * 6)
+            self.assertTrue(all(
+                sample.canonical_alignment is not None
+                and sample.canonical_alignment.disagreement_degrees <= 20.0
+                for sample in retained
+            ))
+
+    def test_eye_axis_disagreement_filtering_refuses_evidence_free_schemas(self):
+        # legacy schemas never recorded the axes, so a declared factor cannot silently apply to
+        # only part of a run
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_complete_session(root, 2)
+
+            with self.assertRaisesRegex(ValueError, "requires canonical alignment evidence"):
+                load_samples(
+                    root, "training", maximum_eye_axis_disagreement_degrees=20.0
+                )
+
+    def test_frozen_checkpoint_binds_the_disagreement_filter(self):
+        self.assertEqual(
+            validated_filtering_config(filtering_config(0.70, 12.0)),
+            filtering_config(0.70, 12.0),
+        )
+        for invalid in (0.0, -1.0, 181.0, float("nan"), True):
+            with self.subTest(invalid=invalid):
+                tampered = filtering_config(0.70, 12.0)
+                tampered["maximum_eye_axis_disagreement_degrees"] = invalid
+                with self.assertRaisesRegex(ValueError, "disagreement filter is invalid"):
+                    validated_filtering_config(tampered)
 
     def test_canonical_schemas_reject_tampered_derived_alignment(self):
         # every serialized crop side must still be recomputable from the raw axes, including
@@ -1174,6 +1244,7 @@ class ArtifactSafetyTests(unittest.TestCase):
             "evaluation_interval": 1,
             "weight_decay": 1e-4,
             "minimum_face_confidence": 0.70,
+            "maximum_eye_axis_disagreement": MAXIMUM_EYE_AXIS_DISAGREEMENT_DEGREES,
             "learning_rate": 1e-4,
             "minimum_learning_rate": 1e-6,
         }

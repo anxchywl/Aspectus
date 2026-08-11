@@ -70,6 +70,18 @@ Reports from schema-5 sessions add a `crop_side_ratio` diagnostic — the per-sa
 shorter to the longer crop side. It is identically `1.0` for v1 by construction; under v2 it
 measures the yaw foreshortening that v1 used to absorb into the far eye's rendered scale.
 
+`--maximum-eye-axis-disagreement` filters on the paired-eye axis disagreement, the reliability
+signal for the contour-derived alignment: the shared rotation is a circular mean of both axes, so
+a large disagreement means the rotation applied to both crops came from contours that do not agree
+with each other. It is a declared factor bound into the checkpoint like the confidence filter, it
+binds a common source dataset at the floor when tightened, and it refuses on schemas that never
+recorded the axes rather than applying to part of a run.
+
+Its default retains everything. No threshold is defensible from the single measured session, and
+tightening is steeply non-linear there: `20°` retains 99.4% of rows and `18°` retains 91.7%, but
+`15°` leaves the `lookUp` block with 22 of 162 rows and `12°` or tighter empties it. Read the
+per-pose retention, not the aggregate, before declaring a value.
+
 Session metadata binds source dimensions, crop sampling, the physical-lens angular labels and the
 Apple Vision revision-3 head-pose convention. Per-sample evidence includes contour and pupil counts
 and source, raw eye-axis endpoints, paired rotation, axis disagreement, crop side and geometric
@@ -192,6 +204,8 @@ The trainer:
 - stops before training when numeric target pitch or head-pitch orientation is inconsistent
 - keeps training and development sessions disjoint
 - applies confidence, eye-openness and head-roll filtering consistently to legacy sessions
+- filters on paired-eye axis disagreement only when that factor is declared, and only where the
+  alignment evidence exists to honour it
 - requires each development session to retain at least 100 samples per pose block, 50 lens samples
   overall, six lens samples per pose, and both repeated lens targets in every pose
 - requires horizontal prompt means to separate from neutral by at least 6° in opposite directions
