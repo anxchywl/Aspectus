@@ -97,11 +97,23 @@ struct GazeDatasetView: View {
     // slack reads as breathing room instead of a stray empty gap
     private static let postureCheckHeight: CGFloat = 100
 
+    /// Every declared slot is filled. Offering another session here would invent a slot the
+    /// protocol does not have — the previous arithmetic reported "validation · slot 3 of 2" and
+    /// still enabled the button, which is how an out-of-protocol seventh session gets recorded by
+    /// accident. Replacing a session is a deliberate act and starts by removing the one it
+    /// replaces, not by recording past the end.
+    private var protocolComplete: Bool {
+        recorded.training >= Self.trainingSlots && recorded.validation >= Self.validationSlots
+    }
+
     private var nextSplit: GazeDatasetSplit {
         recorded.training < Self.trainingSlots ? .training : .validation
     }
 
     private var nextSlotLabel: String {
+        guard !protocolComplete else {
+            return "all \(Self.trainingSlots + Self.validationSlots) slots filled"
+        }
         switch nextSplit {
         case .training:
             return "training · slot \(recorded.training + 1) of \(Self.trainingSlots)"
@@ -121,8 +133,9 @@ struct GazeDatasetView: View {
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("Session role").font(.callout.weight(.medium))
-                Text("next: \(nextSlotLabel)")
+                Text(protocolComplete ? nextSlotLabel : "next: \(nextSlotLabel)")
                     .font(.body.monospaced())
+                    .foregroundStyle(protocolComplete ? Color.green : Color.primary)
             }
             .padding(.horizontal, 14).padding(.vertical, 11)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -162,7 +175,12 @@ struct GazeDatasetView: View {
                    + "\(recorded.training) training · \(recorded.validation) validation")
                 .font(.callout.monospaced()).foregroundStyle(.tertiary)
 
-            if isFullScreen {
+            if protocolComplete {
+                Text("The declared set is complete. Recording another session would fill no slot, "
+                     + "so replacing one starts by deleting the session it replaces.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center).frame(maxWidth: 460)
+            } else if isFullScreen {
                 Button("Start \(nextSplit == .training ? "training" : "validation") session") {
                     controller.startGazeDataset(nextSplit)
                 }
@@ -175,7 +193,7 @@ struct GazeDatasetView: View {
                     .buttonStyle(.borderedProminent)
             }
 
-            if !isFullScreen {
+            if !isFullScreen && !protocolComplete {
                 Text("Collection starts after this window enters full screen.")
                     .font(.caption).foregroundStyle(.orange)
             }
