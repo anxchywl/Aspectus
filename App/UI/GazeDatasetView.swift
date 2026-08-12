@@ -135,7 +135,10 @@ struct GazeDatasetView: View {
                 Text("Session role").font(.callout.weight(.medium))
                 Text(protocolComplete ? nextSlotLabel : "next: \(nextSlotLabel)")
                     .font(.body.monospaced())
-                    .foregroundStyle(protocolComplete ? Color.green : Color.primary)
+                    // explicitly white rather than .primary: this window paints its own black
+                    // background, so .primary resolves against the window's light appearance and
+                    // renders the slot all but invisible
+                    .foregroundStyle(protocolComplete ? Color.green : Color.white)
             }
             .padding(.horizontal, 14).padding(.vertical, 11)
             .frame(maxWidth: .infinity, alignment: .leading)
