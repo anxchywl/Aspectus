@@ -1,10 +1,5 @@
 # Schema-6 collection and experiment protocol
 
-**Status: draft, not frozen.** Freezing is a separate commit that deletes this line and changes
-nothing else. Until then this document may be edited freely; afterwards any change must be its own
-commit stating what changed and why. A predeclaration that can be edited without history is not a
-predeclaration.
-
 It contains no session identifier, participant identifier or private path.
 
 ## 1. Why this replaces schema 5
