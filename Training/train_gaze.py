@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import fcntl
 import hashlib
 import importlib.metadata
+from itertools import combinations
 import json
 import math
 import os
@@ -55,6 +56,27 @@ MINIMUM_VALIDATION_LENS_TARGETS_PER_POSE = 2
 MINIMUM_VALIDATION_HORIZONTAL_POSE_SEPARATION_DEGREES = 6.0
 MINIMUM_VALIDATION_VERTICAL_POSE_SEPARATION_DEGREES = 5.0
 MINIMUM_VALIDATION_ROLL_POSE_SEPARATION_DEGREES = 6.0
+# schema 6 §5, all four recomputed here without any model
+MINIMUM_VIEWING_DISTANCE_MM = 150.0
+MAXIMUM_VIEWING_DISTANCE_MM = 2000.0
+# the pre- and post-session measurements may differ by this much and still describe one session;
+# the collector applies the same bound before it will finish a recording
+MAXIMUM_DISTANCE_DRIFT_MM = 15.0
+# The setup reading itself is not recorded, so the resting pitch is recomputed from the neutral
+# block's median, which is the same posture over a longer window and cannot be taken once and then
+# abandoned. Schema 5 rested from +10.6° to +18.9° with the camera below eye height.
+MAXIMUM_RESTING_PITCH_DEGREES = 15.0
+# A sitting is one uninterrupted period at the machine. Schema 5 had to supersede a development
+# pair recorded twelve minutes after a training session, so the boundary is declared rather than
+# judged: an hour away is long enough that seating has to be re-established, which is the
+# generalisation the development split is supposed to test.
+MINIMUM_SITTING_SEPARATION_SECONDS = 3600.0
+# Crop side is not invertible to a distance — it tracks head pose about as strongly — but compared
+# at matched pose across sessions its ratio should track the inverse distance ratio. Ten percent is
+# loose enough to survive that pose sensitivity and tight enough to catch a stale or mistyped entry.
+MAXIMUM_CROP_SIDE_DISTANCE_DISAGREEMENT = 0.10
+# §7 reports the selection score's stability over this many final epochs alongside the score
+SELECTION_STABILITY_EPOCHS = 20
 CANONICAL_MAXIMUM_MEDIAN_DEGREES = 2.0
 CANONICAL_MAXIMUM_P95_DEGREES = 5.0
 CANONICAL_MAXIMUM_LENS_P95_DEGREES = 3.0
@@ -99,12 +121,21 @@ CANONICAL_CROP_CONTRACT_V1 = _canonical_crop_contract(
 CANONICAL_CROP_CONTRACT_V2 = _canonical_crop_contract(
     2, "1.8x-own-eye-axis-length-pixels"
 )
-CANONICAL_LABEL_CONTRACT = {
+CANONICAL_LABEL_CONTRACT_V1 = {
     "version": 1,
     "units": "degrees",
     "origin": "physical-lens",
     "yawPositive": "subject-right",
     "pitchPositive": "up",
+}
+# v1 screen labels divide by a viewing distance the participant typed into a preference once; v2
+# labels divide by a distance measured for that session. The declaration exists so a run cannot mix
+# them: they are angles computed from different quantities, and mixing them is what closed the
+# schema-5 budget.
+CANONICAL_LABEL_CONTRACT_V2 = {
+    **CANONICAL_LABEL_CONTRACT_V1,
+    "version": 2,
+    "distanceSource": "measured-per-session",
 }
 CANONICAL_HEAD_POSE_CONTRACT = {
     "version": 1,
@@ -159,12 +190,21 @@ INPUT_PREPROCESSING_CONTRACTS = {
         "head_pose_source_contract": CANONICAL_HEAD_POSE_CONTRACT,
     },
 }
-# schema 4 froze crop contract v1; schema 5 is the same collection plan under v2
-CANONICAL_SCHEMA_CROP_VERSIONS = {4: 1, 5: 2}
+# schema 4 froze crop contract v1; schema 5 is the same collection plan under v2. Schema 6 keeps
+# schema 5's crops, columns and pose plan unchanged and differs in one declared factor: viewing
+# distance is measured before and after each session instead of inherited from a preference.
+CANONICAL_SCHEMA_CROP_VERSIONS = {4: 1, 5: 2, 6: 2}
 CANONICAL_SCHEMA_CONTRACTS = {
     4: (CANONICAL_CROP_CONTRACT_V1, CANONICAL_INPUT_CONTRACT_V1),
     5: (CANONICAL_CROP_CONTRACT_V2, CANONICAL_INPUT_CONTRACT_V2),
+    6: (CANONICAL_CROP_CONTRACT_V2, CANONICAL_INPUT_CONTRACT_V2),
 }
+CANONICAL_SCHEMA_LABEL_CONTRACTS = {
+    4: CANONICAL_LABEL_CONTRACT_V1,
+    5: CANONICAL_LABEL_CONTRACT_V1,
+    6: CANONICAL_LABEL_CONTRACT_V2,
+}
+MEASURED_DISTANCE_SCHEMAS = frozenset({6})
 CANONICAL_CROP_SCALE = 1.8
 CANONICAL_SERIALIZATION_RESOLUTION = 1e-12
 CANONICAL_DERIVED_ANGLE_TOLERANCE_DEGREES = 1e-6
@@ -176,6 +216,10 @@ CANONICAL_ALLOWED_PUPIL_SOURCES = frozenset({
 
 def canonical_schema(version: int) -> bool:
     return version in CANONICAL_SCHEMA_CROP_VERSIONS
+
+
+def measures_viewing_distance(version: int) -> bool:
+    return version in MEASURED_DISTANCE_SCHEMAS
 BASE_POSE_PROMPTS = ("neutral", "turnLeft", "turnRight", "lookUp", "lookDown")
 # schema 5 appends the roll blocks, so pose indices 0-4 keep their earlier meaning
 ROLL_POSE_PROMPTS = ("tiltLeft", "tiltRight")
@@ -185,6 +229,7 @@ SCHEMA_POSE_PROMPTS = {
     3: BASE_POSE_PROMPTS,
     4: BASE_POSE_PROMPTS,
     5: BASE_POSE_PROMPTS + ROLL_POSE_PROMPTS,
+    6: BASE_POSE_PROMPTS + ROLL_POSE_PROMPTS,
 }
 POSE_PROMPTS = BASE_POSE_PROMPTS
 # tiltLeft tips the crown toward the participant's own left shoulder. That shoulder is on the
@@ -328,6 +373,30 @@ class CanonicalAlignmentEvidence:
 
 
 @dataclass(frozen=True)
+class DistanceMeasurement:
+    """One physically measured eye-to-lens distance.
+
+    `crop_side_pixels` is the canonical crop side the tracker reported at the moment of the
+    measurement. It is recorded as a cross-check and never inverted into a distance: crop side
+    tracks head pose about as strongly as it tracks distance.
+    """
+    millimetres: float
+    instrument: str
+    measured_at: str
+    crop_side_pixels: float | None = None
+
+
+@dataclass(frozen=True)
+class SessionDistances:
+    opening: DistanceMeasurement
+    closing: DistanceMeasurement
+
+    @property
+    def drift_mm(self) -> float:
+        return abs(self.closing.millimetres - self.opening.millimetres)
+
+
+@dataclass(frozen=True)
 class Sample:
     session_id: str
     split: str
@@ -345,11 +414,14 @@ class Sample:
     participant_binding: str = ""
     setup_binding: str = ""
     session_created_at: str = ""
+    session_completed_at: str = ""
     session_metadata_sha256: str = ""
     manifest_sha256: str = ""
     input_contract: str = ""
     label_contract_sha256: str = ""
     canonical_alignment: CanonicalAlignmentEvidence | None = None
+    # one shared instance per session; None for every schema that declared its distance
+    session_distances: SessionDistances | None = None
 
 
 @dataclass(frozen=True)
@@ -603,8 +675,22 @@ def validated_positive_integer(value: object, name: str) -> int:
     return value
 
 
-def label_contract_digest() -> str:
-    return canonical_digest(CANONICAL_LABEL_CONTRACT)
+def schema_label_contract(schema_version: int | None = None) -> dict[str, object]:
+    """Legacy schemas predate the declaration and are v1 by construction."""
+    if schema_version is None:
+        return CANONICAL_LABEL_CONTRACT_V1
+    return CANONICAL_SCHEMA_LABEL_CONTRACTS.get(schema_version, CANONICAL_LABEL_CONTRACT_V1)
+
+
+def label_contract_digest(schema_version: int | None = None) -> str:
+    return canonical_digest(schema_label_contract(schema_version))
+
+
+def supported_label_contract_digests() -> set[str]:
+    return {
+        canonical_digest(contract)
+        for contract in CANONICAL_SCHEMA_LABEL_CONTRACTS.values()
+    }
 
 
 def matches_canonical_contract(value: object, expected: object) -> bool:
@@ -641,7 +727,7 @@ def sample_input_contract(sample: Sample) -> str:
 
 
 def sample_label_contract_sha256(sample: Sample) -> str:
-    return sample.label_contract_sha256 or label_contract_digest()
+    return sample.label_contract_sha256 or label_contract_digest(sample.schema_version)
 
 
 def require_single_input_preprocessing(*sample_groups: Iterable[Sample]) -> dict[str, object]:
@@ -661,10 +747,13 @@ def require_single_label_contract(*sample_groups: Iterable[Sample]) -> str:
         for samples in sample_groups
         for sample in samples
     }
+    # one contract per run, and it has to be one this trainer knows. Both halves matter: a declared
+    # distance and a measured distance produce screen angles that are not the same quantity, so a
+    # run holding both would be averaging over the defect schema 6 exists to remove.
     if len(digests) != 1:
         raise ValueError("training and development sessions mix label contracts")
     digest = validated_sha256(next(iter(digests)), "label contract")
-    if digest != label_contract_digest():
+    if digest not in supported_label_contract_digests():
         raise ValueError("unsupported label contract")
     return digest
 
@@ -904,9 +993,64 @@ def validated_session_timestamps(metadata: dict[str, object]) -> tuple[str, str]
     return created.isoformat(), completed.isoformat()
 
 
+def validated_distance_measurement(value: object, name: str) -> DistanceMeasurement:
+    if not isinstance(value, dict):
+        raise ValueError(f"session {name} distance measurement is missing")
+    millimetres = value.get("millimetres")
+    if isinstance(millimetres, bool) or not isinstance(millimetres, (int, float)) \
+            or not math.isfinite(millimetres) \
+            or not MINIMUM_VIEWING_DISTANCE_MM <= millimetres <= MAXIMUM_VIEWING_DISTANCE_MM:
+        raise ValueError(f"session {name} distance measurement is invalid")
+    instrument = value.get("instrument")
+    # an unnamed instrument is not a measurement anyone can audit or repeat
+    if not isinstance(instrument, str) or not instrument.strip():
+        raise ValueError(f"session {name} distance measurement names no instrument")
+    measured_at = parsed_utc_timestamp(
+        value.get("measuredAt"), f"{name} distance measurement"
+    )
+    crop_side = value.get("cropSidePixels")
+    if crop_side is None:
+        crop_side_pixels = None
+    elif isinstance(crop_side, bool) or not isinstance(crop_side, (int, float)) \
+            or not math.isfinite(crop_side) or crop_side <= 0:
+        raise ValueError(f"session {name} distance crop-side reading is invalid")
+    else:
+        crop_side_pixels = float(crop_side)
+    return DistanceMeasurement(
+        millimetres=float(millimetres),
+        instrument=instrument.strip(),
+        measured_at=measured_at.isoformat(),
+        crop_side_pixels=crop_side_pixels,
+    )
+
+
+def validated_session_distances(
+    metadata: dict[str, object], viewing_distance_mm: float,
+) -> SessionDistances:
+    """Schema 6 §5: both measurements present, in agreement, and actually used for the labels."""
+    opening = validated_distance_measurement(metadata.get("openingDistance"), "opening")
+    closing = validated_distance_measurement(metadata.get("closingDistance"), "closing")
+    if closing.measured_at < opening.measured_at:
+        raise ValueError("session closing distance was measured before the opening one")
+    distances = SessionDistances(opening=opening, closing=closing)
+    if distances.drift_mm > MAXIMUM_DISTANCE_DRIFT_MM:
+        raise ValueError(
+            f"session distance moved {distances.drift_mm:.1f} mm between its measurements, "
+            f"past the {MAXIMUM_DISTANCE_DRIFT_MM:.0f} mm limit: no single distance describes it"
+        )
+    # the point of the schema. Labels are atan2(offset, distance), so a session whose geometry
+    # does not carry the measured distance was labelled from something else — a stale preference
+    # is exactly the something else this protocol exists to exclude.
+    if not math.isclose(viewing_distance_mm, opening.millimetres, rel_tol=0, abs_tol=1e-6):
+        raise ValueError(
+            "session labels were not computed from the measured opening distance"
+        )
+    return distances
+
+
 def validated_session_setup(
     metadata: dict[str, object], schema_version: int | None = None,
-) -> tuple[dict[str, float], str, str, str, tuple[int, int] | None]:
+) -> tuple[dict[str, float], str, str, str, tuple[int, int] | None, SessionDistances | None]:
     if schema_version is None:
         value = metadata.get("schemaVersion")
         if isinstance(value, bool) or not isinstance(value, int):
@@ -924,8 +1068,19 @@ def validated_session_setup(
             raise ValueError("session display geometry is invalid")
         values[name] = float(value)
     if values["displayWidthMM"] <= 1 or values["displayHeightMM"] <= 1 \
-            or not 150 <= values["viewingDistanceMM"] <= 2000:
+            or not MINIMUM_VIEWING_DISTANCE_MM <= values["viewingDistanceMM"] \
+            <= MAXIMUM_VIEWING_DISTANCE_MM:
         raise ValueError("session display geometry is invalid")
+    distances: SessionDistances | None = None
+    geometry_binding: dict[str, object] = dict(values)
+    if measures_viewing_distance(schema_version):
+        distances = validated_session_distances(metadata, values["viewingDistanceMM"])
+        # Distance is now a per-session measurement, so hashing it into the shared recording setup
+        # would make every session its own setup and fail the one-setup requirement for the reason
+        # the schema exists. The display and camera still have to match; the distance is checked
+        # per session above and cross-checked between sessions in §5.
+        geometry_binding.pop("viewingDistanceMM")
+        geometry_binding["viewingDistanceSource"] = "measured-per-session"
     camera_format = metadata.get("cameraFormat")
     if not isinstance(camera_format, str) or not camera_format:
         raise ValueError("session camera format is invalid")
@@ -934,7 +1089,7 @@ def validated_session_setup(
         raise ValueError("session eye image dimensions are invalid")
     setup = {
         "camera_format": camera_format,
-        "display_geometry": values,
+        "display_geometry": geometry_binding,
         "eye_image_height": IMAGE_SIZE,
         "eye_image_width": IMAGE_SIZE,
     }
@@ -952,8 +1107,9 @@ def validated_session_setup(
             metadata.get("cropContract"), crop_contract
         ):
             raise ValueError("session canonical-schema crop contract is invalid")
+        label_contract = schema_label_contract(schema_version)
         if not matches_canonical_contract(
-            metadata.get("labelContract"), CANONICAL_LABEL_CONTRACT
+            metadata.get("labelContract"), label_contract
         ):
             raise ValueError("session canonical-schema label contract is invalid")
         if not matches_canonical_contract(
@@ -966,7 +1122,7 @@ def validated_session_setup(
             "source_image_width": source_width,
             "source_image_height": source_height,
             "crop_contract": crop_contract,
-            "label_contract": CANONICAL_LABEL_CONTRACT,
+            "label_contract": label_contract,
             "head_pose_contract": CANONICAL_HEAD_POSE_CONTRACT,
         })
     binding = hashlib.sha256(
@@ -976,8 +1132,9 @@ def validated_session_setup(
         values,
         binding,
         input_contract,
-        label_contract_digest(),
+        label_contract_digest(schema_version),
         source_image_size,
+        distances,
     )
 
 
@@ -1059,8 +1216,9 @@ def load_samples(
             input_contract,
             session_label_contract_sha256,
             source_image_size,
+            session_distances,
         ) = validated_session_setup(metadata, schema_version)
-        session_created_at, _ = validated_session_timestamps(metadata)
+        session_created_at, session_completed_at = validated_session_timestamps(metadata)
         if selected_session_ids is None and stored_split != split:
             continue
         if selected_session_ids is not None and session_id not in selected_session_ids:
@@ -1218,11 +1376,13 @@ def load_samples(
                     participant_binding=participant_binding,
                     setup_binding=setup_binding,
                     session_created_at=session_created_at,
+                    session_completed_at=session_completed_at,
                     session_metadata_sha256=session_metadata_sha256,
                     manifest_sha256=manifest_sha256,
                     input_contract=input_contract,
                     label_contract_sha256=session_label_contract_sha256,
                     canonical_alignment=canonical_alignment,
+                    session_distances=session_distances,
                 )
             )
         if target_counts != {target_id: samples_per_target for target_id in range(target_count)}:
@@ -1439,6 +1599,147 @@ def validate_numeric_pitch_contract(
             )
     if require_head_pitch and eligible_head_pose_sessions != len(expected_sessions):
         raise ValueError("numeric head-pitch verification requires schema-2-or-newer sessions")
+
+
+def neutral_block_samples(samples: list[Sample], session_id: str) -> list[Sample]:
+    """The neutral block is pose index 0 in every schema, so it is the one window in which
+    sessions are directly comparable to each other."""
+    return [
+        sample for sample in samples
+        if sample.session_id == session_id and sample.target_id // TARGETS_PER_POSE == 0
+    ]
+
+
+def session_resting_pitch_degrees(samples: list[Sample], session_id: str) -> float:
+    neutral = neutral_block_samples(samples, session_id)
+    if not neutral:
+        raise ValueError(f"resting-pitch verification lacks the neutral block for {session_id}")
+    return statistics.median(sample.head_pose[1] for sample in neutral)
+
+
+def session_neutral_crop_side_pixels(samples: list[Sample], session_id: str) -> float:
+    neutral = neutral_block_samples(samples, session_id)
+    if not neutral:
+        raise ValueError(f"crop-side verification lacks the neutral block for {session_id}")
+    sides: list[float] = []
+    for sample in neutral:
+        alignment = sample.canonical_alignment
+        if alignment is None:
+            raise ValueError("crop-side verification requires canonical alignment evidence")
+        pair = (alignment.left.crop_side_pixels, alignment.right.crop_side_pixels)
+        if any(not math.isfinite(side) or side <= 0 for side in pair):
+            raise ValueError("crop-side verification found an unusable crop side")
+        sides.append(statistics.fmean(pair))
+    return statistics.median(sides)
+
+
+def session_distance_evidence(samples: list[Sample], session_id: str) -> SessionDistances:
+    measured = {
+        sample.session_distances for sample in samples
+        if sample.session_id == session_id
+    }
+    if len(measured) != 1 or None in measured:
+        raise ValueError(f"{session_id} does not carry one pair of distance measurements")
+    return next(iter(measured))  # type: ignore[return-value]
+
+
+def validate_measured_distance_protocol(
+    training_samples: list[Sample],
+    development_samples: list[Sample],
+    training_sessions: Iterable[str],
+    development_sessions: Iterable[str],
+) -> dict[str, object] | None:
+    """The schema-6 §5 checks that no earlier schema could make, all computed without a model.
+
+    Returns the per-session distance evidence the reports have to carry, or None for a run of
+    sessions that declared their viewing distance rather than measuring it.
+    """
+    training_sessions = list(training_sessions)
+    development_sessions = list(development_sessions)
+    samples = training_samples + development_samples
+    sessions = training_sessions + development_sessions
+    measured = {measures_viewing_distance(sample.schema_version) for sample in samples}
+    if measured == {False}:
+        return None
+    if measured != {True}:
+        # the label-contract check catches this too, but naming the actual defect beats reporting
+        # a digest mismatch: these sessions' screen angles are not the same quantity
+        raise ValueError("run mixes measured-distance and declared-distance sessions")
+
+    evidence: dict[str, object] = {}
+    for session_id in sessions:
+        distances = session_distance_evidence(samples, session_id)
+        resting_pitch = session_resting_pitch_degrees(samples, session_id)
+        if abs(resting_pitch) > MAXIMUM_RESTING_PITCH_DEGREES:
+            raise ValueError(
+                f"{session_id} rests at {resting_pitch:.1f}° of pitch, past the "
+                f"{MAXIMUM_RESTING_PITCH_DEGREES:.0f}° seating limit: the camera is too far "
+                "from eye height"
+            )
+        evidence[session_id] = {
+            "opening": asdict(distances.opening),
+            "closing": asdict(distances.closing),
+            "drift_mm": distances.drift_mm,
+            "resting_pitch_degrees": resting_pitch,
+            "neutral_crop_side_pixels": session_neutral_crop_side_pixels(samples, session_id),
+        }
+
+    validate_neutral_crop_side_consistency(evidence)
+    validate_sitting_separation(
+        training_samples, development_samples, training_sessions, development_sessions
+    )
+    return evidence
+
+
+def validate_neutral_crop_side_consistency(evidence: dict[str, object]) -> None:
+    """Crop side scales as 1/distance, so `side x distance` is the quantity that should hold
+    across sessions at matched pose. It will not detect a small error — pose moves crop side
+    too — but a stale or mistyped distance moves the product well past the bound, and that is
+    the failure this protocol exists to prevent."""
+    products = {
+        session_id: value["neutral_crop_side_pixels"] * value["opening"]["millimetres"]
+        for session_id, value in evidence.items()  # type: ignore[index]
+    }
+    for first, second in combinations(sorted(products), 2):
+        ratio = products[first] / products[second]
+        disagreement = max(ratio, 1 / ratio) - 1
+        if disagreement > MAXIMUM_CROP_SIDE_DISTANCE_DISAGREEMENT:
+            raise ValueError(
+                f"neutral-block crop side disagrees with the measured distance by "
+                f"{disagreement:.1%} between {first} and {second}, past the "
+                f"{MAXIMUM_CROP_SIDE_DISTANCE_DISAGREEMENT:.0%} bound: one of the two distances "
+                "does not describe the session it is attached to"
+            )
+
+
+def validate_sitting_separation(
+    training_samples: list[Sample],
+    development_samples: list[Sample],
+    training_sessions: Iterable[str],
+    development_sessions: Iterable[str],
+) -> None:
+    """Development sessions must come from a later sitting than every training session. Schema 5
+    stated the requirement and only implied the ordering, and a development pair recorded twelve
+    minutes after a training session had to be superseded for it."""
+    completions = [
+        parsed_utc_timestamp(sample.session_completed_at, "completion")
+        for sample in training_samples
+        if sample.session_id in set(training_sessions)
+    ]
+    creations = [
+        parsed_utc_timestamp(sample.session_created_at, "creation")
+        for sample in development_samples
+        if sample.session_id in set(development_sessions)
+    ]
+    if not completions or not creations:
+        raise ValueError("sitting separation requires both training and development sessions")
+    separation = (min(creations) - max(completions)).total_seconds()
+    if separation < MINIMUM_SITTING_SEPARATION_SECONDS:
+        raise ValueError(
+            f"a development session starts {separation / 60:.0f} minutes after a training "
+            f"session ends, inside the {MINIMUM_SITTING_SEPARATION_SECONDS / 60:.0f} minute "
+            "sitting boundary: it is the same sitting, so it does not test a re-seating"
+        )
 
 
 def gaze_vectors(angles: np.ndarray) -> np.ndarray:
@@ -2564,6 +2865,26 @@ def serialise_epoch(result: EpochEvaluation) -> dict[str, object]:
     }
 
 
+def selection_stability(
+    evaluated_epochs: list[EpochEvaluation],
+) -> dict[str, float | int]:
+    """Schema 6 §7: a selection score is not comparable to another score without its spread.
+
+    Schema 5's baseline selected 1.508 from a run whose last twenty epochs spanned 0.558, so the
+    headline figure was a favourable fluctuation rather than the level the run had reached.
+    """
+    window = sorted(evaluated_epochs, key=lambda result: result.epoch)[
+        -SELECTION_STABILITY_EPOCHS:
+    ]
+    scores = [result.selection_score for result in window]
+    return {
+        "epochs": len(window),
+        "minimum": min(scores),
+        "maximum": max(scores),
+        "spread": max(scores) - min(scores),
+    }
+
+
 def protect_private_artifact(path: Path) -> None:
     if path.is_dir():
         path.chmod(0o700)
@@ -2811,7 +3132,7 @@ def validated_seed_run(report_path: Path) -> dict[str, object]:
     validated_filtering_config(report.get("filtering"))
     validated_input_preprocessing(report.get("input_preprocessing"))
     if validated_sha256(report.get("label_contract_sha256"), "label contract") \
-            != label_contract_digest():
+            not in supported_label_contract_digests():
         raise ValueError("candidate report label contract is unsupported")
     for name in (
         "training_samples", "development_samples",
@@ -2888,7 +3209,8 @@ def validated_seed_run(report_path: Path) -> dict[str, object]:
         "source_training_data_sha256", "source_development_data_sha256",
         "source_training_samples", "source_development_samples",
         "training_epochs", "evaluation_interval", "selected_epoch", "seed",
-        "evaluated_epochs", "selection", "batch_size", "trainable_parameters",
+        "evaluated_epochs", "selection", "selection_stability", "session_distances",
+        "batch_size", "trainable_parameters",
         "fine_tuning", "loss", "optimizer", "filtering", "augmentation",
         "input_preprocessing", "label_contract_sha256",
         "software_versions", "trainer_sha256",
@@ -3308,6 +3630,9 @@ def run_train(args: argparse.Namespace) -> int:
         training, training_sessions, require_head_pitch=False
     )
     validate_numeric_pitch_contract(validation, validation_sessions)
+    distance_evidence = validate_measured_distance_protocol(
+        training, validation, training_sessions, validation_sessions
+    )
     participants = training_participants | validation_participants
     if len(participants) != 1 or training_participants != validation_participants:
         raise ValueError(
@@ -3421,6 +3746,7 @@ def run_train(args: argparse.Namespace) -> int:
         result for result in outcome.evaluated_epochs
         if result.epoch == outcome.selected_epoch
     )
+    stability = selection_stability(outcome.evaluated_epochs)
     passed = all(
         gate_passes(evaluation, gates)
         for evaluation in outcome.selected_session_evaluations.values()
@@ -3444,6 +3770,7 @@ def run_train(args: argparse.Namespace) -> int:
         "known_completed_sessions": known_completed_sessions,
         "frozen_at": frozen_at,
         "setup_sha256": setup_sha256,
+        "session_distances": distance_evidence,
         "training_data_sha256": training_data_sha256,
         "development_data_sha256": development_data_sha256,
         "source_training_data_sha256": source_training_data_sha256,
@@ -3455,6 +3782,7 @@ def run_train(args: argparse.Namespace) -> int:
         "selected_epoch": outcome.selected_epoch,
         "evaluated_epochs": evaluated_epochs,
         "selection": serialise_epoch(selected),
+        "selection_stability": stability,
         "development_passed": passed,
         "development_session_evaluations": {
             session_id: asdict(evaluation)
@@ -3492,6 +3820,7 @@ def run_train(args: argparse.Namespace) -> int:
         "selected_epoch": outcome.selected_epoch,
         "evaluated_epochs": evaluated_epochs,
         "selection": serialise_epoch(selected),
+        "selection_stability": stability,
         "trainable_parameters": trainable_parameters,
         "fine_tuning": fine_tuning,
         "loss": loss_configuration,
@@ -3515,6 +3844,7 @@ def run_train(args: argparse.Namespace) -> int:
         "development_sessions": validation_sessions,
         "known_completed_sessions": known_completed_sessions,
         "setup_sha256": setup_sha256,
+        "session_distances": distance_evidence,
         "evaluation": asdict(outcome.selected_evaluation),
         "session_evaluations": {
             session_id: asdict(evaluation)
@@ -3643,6 +3973,12 @@ def run_evaluate(args: argparse.Namespace) -> int:
         validate_numeric_pitch_contract(
             source_development, source_development_sessions
         )
+    # the untouched final session is held to the same seating, measurement and sitting rules as
+    # the sessions the model was selected on; it is the one recorded last, so it can only be later
+    distance_evidence = validate_measured_distance_protocol(
+        training, development + validation, loaded_training_sessions,
+        list(loaded_development_sessions) + list(validation_sessions),
+    )
     if len(validation_participants) != 1 \
             or training_participants != validation_participants \
             or development_participants != validation_participants:
@@ -3737,6 +4073,7 @@ def run_evaluate(args: argparse.Namespace) -> int:
         "development_sessions": loaded_development_sessions,
         "known_completed_session_sha256": known_completed_session_sha256,
         "setup_sha256": setup_sha256,
+        "session_distances": distance_evidence,
         "checkpoint_frozen_at": checkpoint["frozen_at"],
         "candidate_frozen_at": candidate_manifest["frozen_at"],
         "candidate_manifest_sha256": candidate_manifest_sha256,

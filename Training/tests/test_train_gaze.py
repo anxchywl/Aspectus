@@ -29,10 +29,13 @@ from train_gaze import (
     CANONICAL_HEAD_POSE_CONTRACT,
     CANONICAL_INPUT_CONTRACT_V1,
     CANONICAL_INPUT_CONTRACT_V2,
-    CANONICAL_LABEL_CONTRACT,
+    CANONICAL_LABEL_CONTRACT_V1,
+    CANONICAL_LABEL_CONTRACT_V2,
     CANONICAL_SCHEMA_CONTRACTS,
+    MAXIMUM_RESTING_PITCH_DEGREES,
     CanonicalAlignmentEvidence,
     CHECKPOINT_FORMAT_VERSION,
+    EpochEvaluation,
     Evaluation,
     EyeQualityEvidence,
     FINAL_EVALUATION_FILENAME,
@@ -64,6 +67,10 @@ from train_gaze import (
     input_preprocessing_contract,
     label_contract_digest,
     learning_rate_scheduler,
+    measures_viewing_distance,
+    schema_label_contract,
+    selection_stability,
+    validate_measured_distance_protocol,
     load_checkpoint_model,
     load_samples,
     mirror_gaze_sample,
@@ -125,6 +132,10 @@ def plan_size(schema_version: int) -> tuple[int, int]:
 
 
 def metadata(schema_version: int, split: str = "training") -> dict:
+    # measured-distance schemas require the development split to come from a later sitting, so
+    # fixture validation sessions are recorded a clear day after the training ones
+    day = "2026-01-02" if measures_viewing_distance(schema_version) \
+        and split == "validation" else "2026-01-01"
     value = {
         "schemaVersion": schema_version,
         "participantID": "participant",
@@ -138,25 +149,42 @@ def metadata(schema_version: int, split: str = "training") -> dict:
         "eyeImageWidth": 60,
         "eyeImageHeight": 60,
         "cameraFormat": "fixture camera 1280x720@30 BGRA",
-        "createdAt": "2026-01-01T00:00:00Z",
-        "completedAt": "2026-01-01T00:05:00Z",
+        "createdAt": f"{day}T00:00:00Z",
+        "completedAt": f"{day}T00:05:00Z",
     }
     if canonical_schema(schema_version):
         value.update({
             "sourceImageWidth": 1280,
             "sourceImageHeight": 720,
             "cropContract": CANONICAL_SCHEMA_CONTRACTS[schema_version][0],
-            "labelContract": CANONICAL_LABEL_CONTRACT,
+            "labelContract": schema_label_contract(schema_version),
             "headPoseContract": CANONICAL_HEAD_POSE_CONTRACT,
+        })
+    if measures_viewing_distance(schema_version):
+        value.update({
+            "openingDistance": distance_measurement(f"{day}T00:00:00Z"),
+            "closingDistance": distance_measurement(f"{day}T00:05:00Z"),
         })
     return value
 
 
+def distance_measurement(measured_at: str, millimetres: float | None = None) -> dict:
+    return {
+        # the labels are computed from this, so it has to be the geometry's own distance
+        "millimetres": TEST_DISPLAY_GEOMETRY["viewingDistanceMM"]
+        if millimetres is None else millimetres,
+        "instrument": "steel rule",
+        "measuredAt": measured_at,
+        "cropSidePixels": 230.4,
+    }
+
+
 def manifest_row(columns: list[str], sample_number: int,
-                 schema_version: int, split: str = "training") -> dict[str, str]:
+                 schema_version: int, split: str = "training",
+                 geometry: dict | None = None) -> dict[str, str]:
     target_id = (sample_number - 1) // 6
     kind, target_x, target_y, target_yaw, target_pitch, pose = expected_target_label(
-        split, target_id, TEST_DISPLAY_GEOMETRY, pose_prompts(schema_version)
+        split, target_id, geometry or TEST_DISPLAY_GEOMETRY, pose_prompts(schema_version)
     )
     row = {column: "0" for column in columns}
     row.update({
@@ -218,11 +246,14 @@ def manifest_row(columns: list[str], sample_number: int,
 
 
 def write_complete_session(root: Path, schema_version: int, split: str = "training",
-                           row_mutator=None, metadata_mutator=None) -> Path:
-    session = root / f"{split}-session"
+                           row_mutator=None, metadata_mutator=None,
+                           geometry: dict | None = None, name: str | None = None) -> Path:
+    session = root / (name or f"{split}-session")
     session.mkdir()
     Image.new("RGB", (60, 60)).save(session / "eye.png")
     session_metadata = metadata(schema_version, split)
+    if geometry is not None:
+        session_metadata["displayGeometry"] = geometry
     if metadata_mutator is not None:
         metadata_mutator(session_metadata)
     (session / "session.json").write_text(json.dumps(session_metadata))
@@ -235,11 +266,60 @@ def write_complete_session(root: Path, schema_version: int, split: str = "traini
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         for sample_number in range(1, plan_size(schema_version)[1] + 1):
-            row = manifest_row(columns, sample_number, schema_version, split)
+            row = manifest_row(columns, sample_number, schema_version, split, geometry)
             if row_mutator is not None:
                 row_mutator(row, sample_number)
             writer.writerow(row)
     return session
+
+
+def write_measured_session(
+    root: Path, split: str = "training", session_id: str = "session",
+    distance_mm: float = 500.0, crop_scale: float = 1.0, pitch_offset: float = 0.0,
+    day: str | None = None, drift_mm: float = 0.0,
+    label_distance_mm: float | None = None,
+) -> Path:
+    """A complete schema-6 session, with the levers §5 checks: the measured distance, the crop
+    side that should track it, the resting pitch, and which sitting it belongs to."""
+    day = day or ("2026-01-02" if split == "validation" else "2026-01-01")
+    geometry = {
+        **TEST_DISPLAY_GEOMETRY,
+        # labels are computed from this, and §5 requires it to be the opening measurement
+        "viewingDistanceMM": distance_mm if label_distance_mm is None else label_distance_mm,
+    }
+    # crop side is 1.8 x the eye axis, so a session recorded closer renders a wider crop; both
+    # axes stay horizontal and centred, leaving rotation and disagreement at zero
+    half = 0.05 * crop_scale
+    side = 230.4 * crop_scale
+
+    def scale_axes(row, sample_number):
+        row["session_id"] = session_id
+        for suffix, centre in (("l", 0.30), ("r", 0.70)):
+            row[f"axis_start_x_{suffix}"] = f"{centre - half:.12f}"
+            row[f"axis_end_x_{suffix}"] = f"{centre + half:.12f}"
+            row[f"crop_side_px_{suffix}"] = f"{side:.12f}"
+        if pitch_offset:
+            target_id = (sample_number - 1) // 6
+            pitch = TEST_VALIDATION_HEAD_POSES[target_id // 27][1] + pitch_offset
+            row["head_pitch_deg"] = f"{pitch:.12f}"
+
+    def set_metadata(value):
+        value["sessionID"] = session_id
+        value["createdAt"] = f"{day}T00:00:00Z"
+        value["completedAt"] = f"{day}T00:05:00Z"
+        value["openingDistance"] = distance_measurement(
+            f"{day}T00:00:00Z", distance_mm
+        )
+        value["closingDistance"] = distance_measurement(
+            f"{day}T00:05:00Z", distance_mm + drift_mm
+        )
+        value["openingDistance"]["cropSidePixels"] = side
+        value["closingDistance"]["cropSidePixels"] = side
+
+    return write_complete_session(
+        root, 6, split, row_mutator=scale_axes, metadata_mutator=set_metadata,
+        geometry=geometry, name=f"{split}-{session_id}",
+    )
 
 
 def numeric_pitch_samples(
@@ -458,9 +538,12 @@ class DatasetLoadingTests(unittest.TestCase):
     def test_canonical_schemas_load_only_their_frozen_contract(self):
         self.assertEqual(len(REQUIRED_COLUMNS | canonical_columns(4)), 41)
         self.assertEqual(len(REQUIRED_COLUMNS | canonical_columns(5)), 42)
+        # schema 6 changes labels, not rows: it reads exactly the columns schema 5 writes
+        self.assertEqual(canonical_columns(6), canonical_columns(5))
         expected_contracts = {
             4: CANONICAL_INPUT_CONTRACT_V1,
             5: CANONICAL_INPUT_CONTRACT_V2,
+            6: CANONICAL_INPUT_CONTRACT_V2,
         }
         for schema_version, expected_contract in expected_contracts.items():
             with self.subTest(schema_version=schema_version):
@@ -473,7 +556,8 @@ class DatasetLoadingTests(unittest.TestCase):
                     self.assertEqual(len(samples), plan_size(schema_version)[1])
                     self.assertEqual(samples[0].input_contract, expected_contract)
                     self.assertEqual(
-                        samples[0].label_contract_sha256, label_contract_digest()
+                        samples[0].label_contract_sha256,
+                        label_contract_digest(schema_version),
                     )
                     evidence = samples[0].canonical_alignment
                     self.assertIsNotNone(evidence)
@@ -1079,6 +1163,229 @@ class DatasetLoadingTests(unittest.TestCase):
                 expected.update(image_sha256.encode())
 
             self.assertEqual(sample_set_digest([sample]), expected.hexdigest())
+
+
+class MeasuredDistanceTests(unittest.TestCase):
+    """Schema 6 §5. Every check here is computed without a model, and each one exists because
+    schema 5 recorded the failure it catches."""
+
+    def loaded(self, root: Path):
+        training, _, training_sessions = load_samples(root, "training")
+        development, _, development_sessions = load_samples(root, "validation")
+        return training, development, training_sessions, development_sessions
+
+    def validated(self, root: Path):
+        return validate_measured_distance_protocol(*self.loaded(root))
+
+    def write_pair(self, root: Path, **development):
+        write_measured_session(root, "training", "training-one")
+        write_measured_session(root, "validation", "development-one", **development)
+
+    def test_a_measured_session_carries_both_measurements_and_their_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.write_pair(root)
+
+            evidence = self.validated(root)
+
+            assert evidence is not None
+            self.assertEqual(sorted(evidence), ["development-one", "training-one"])
+            session = evidence["training-one"]
+            self.assertEqual(session["opening"]["millimetres"], 500.0)
+            self.assertEqual(session["closing"]["millimetres"], 500.0)
+            self.assertEqual(session["opening"]["instrument"], "steel rule")
+            self.assertEqual(session["drift_mm"], 0.0)
+            self.assertEqual(session["resting_pitch_degrees"], 0.0)
+            self.assertEqual(session["neutral_crop_side_pixels"], 230.4)
+
+    def test_schema_six_declares_a_label_contract_schema_five_cannot_match(self):
+        self.assertEqual(schema_label_contract(5), CANONICAL_LABEL_CONTRACT_V1)
+        self.assertEqual(schema_label_contract(6), CANONICAL_LABEL_CONTRACT_V2)
+        self.assertNotIn("distanceSource", CANONICAL_LABEL_CONTRACT_V1)
+        self.assertEqual(
+            CANONICAL_LABEL_CONTRACT_V2["distanceSource"], "measured-per-session"
+        )
+        # the digests differ, so require_single_label_contract refuses a run holding both
+        self.assertNotEqual(label_contract_digest(5), label_contract_digest(6))
+
+    def test_a_run_may_not_mix_declared_and_measured_distance_sessions(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_complete_session(root, 5, "training")
+            write_measured_session(root, "validation", "development-one")
+
+            with self.assertRaises(ValueError) as error:
+                self.validated(root)
+
+            self.assertIn("mixes measured-distance", str(error.exception))
+
+    def test_labels_computed_from_something_other_than_the_measurement_are_refused(self):
+        # the schema-5 defect exactly: the session was recorded at 520 mm and labelled at 500
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_measured_session(
+                root, "training", "training-one",
+                distance_mm=520.0, label_distance_mm=500.0,
+            )
+
+            with self.assertRaises(ValueError) as error:
+                load_samples(root, "training")
+
+            self.assertIn("measured opening distance", str(error.exception))
+
+    def test_a_session_the_participant_moved_through_is_refused(self):
+        for drift, refused in ((15.0, False), (15.5, True)):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_measured_session(
+                    root, "training", "training-one", drift_mm=drift
+                )
+
+                if not refused:
+                    self.assertTrue(load_samples(root, "training")[0])
+                    continue
+                with self.assertRaises(ValueError) as error:
+                    load_samples(root, "training")
+                self.assertIn("no single distance describes it", str(error.exception))
+
+    def test_a_measurement_without_a_named_instrument_is_not_a_measurement(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_measured_session(root, "training", "training-one")
+            path = root / "training-training-one" / "session.json"
+            value = json.loads(path.read_text())
+            value["openingDistance"]["instrument"] = "  "
+            path.write_text(json.dumps(value))
+
+            with self.assertRaises(ValueError) as error:
+                load_samples(root, "training")
+
+            self.assertIn("names no instrument", str(error.exception))
+
+    def test_a_missing_closing_measurement_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_measured_session(root, "training", "training-one")
+            path = root / "training-training-one" / "session.json"
+            value = json.loads(path.read_text())
+            del value["closingDistance"]
+            path.write_text(json.dumps(value))
+
+            with self.assertRaises(ValueError) as error:
+                load_samples(root, "training")
+
+            self.assertIn("closing distance measurement is missing", str(error.exception))
+
+    def test_sessions_at_different_measured_distances_share_one_recording_setup(self):
+        # the distance is now per session by design, so hashing it into the setup binding would
+        # make every schema-6 run fail the one-setup requirement for the reason the schema exists
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_measured_session(root, "training", "training-one", distance_mm=500.0)
+            write_measured_session(
+                root, "validation", "development-one",
+                distance_mm=550.0, crop_scale=500.0 / 550.0,
+            )
+            training, development, _, _ = self.loaded(root)
+
+            self.assertEqual(
+                require_single_recording_setup(training, development),
+                training[0].setup_binding,
+            )
+
+    def test_a_different_display_still_splits_the_recording_setup(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_measured_session(root, "training", "training-one")
+            write_complete_session(
+                root, 6, "validation",
+                row_mutator=lambda row, number: row.update(
+                    {"session_id": "development-one"}
+                ),
+                metadata_mutator=lambda value: value.update(
+                    {"sessionID": "development-one"}
+                ),
+                geometry={**TEST_DISPLAY_GEOMETRY, "displayWidthMM": 400.0},
+                name="validation-development-one",
+            )
+            training, development, _, _ = self.loaded(root)
+
+            with self.assertRaises(ValueError):
+                require_single_recording_setup(training, development)
+
+    def test_seating_above_the_pitch_limit_is_refused(self):
+        self.assertEqual(MAXIMUM_RESTING_PITCH_DEGREES, 15.0)
+        for pitch, refused in ((15.0, False), (16.0, True)):
+            with self.subTest(pitch=pitch), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.write_pair(root, pitch_offset=pitch)
+
+                if not refused:
+                    self.assertIsNotNone(self.validated(root))
+                    continue
+                with self.assertRaises(ValueError) as error:
+                    self.validated(root)
+                self.assertIn("seating limit", str(error.exception))
+
+    def test_a_development_session_in_the_same_sitting_is_refused(self):
+        # schema 5 had to supersede a development pair recorded twelve minutes after a training
+        # session, which is what made the ordering a validity condition rather than an expectation
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.write_pair(root, day="2026-01-01")
+
+            with self.assertRaises(ValueError) as error:
+                self.validated(root)
+
+            self.assertIn("sitting boundary", str(error.exception))
+
+    def test_crop_side_must_track_the_measured_distance_between_sessions(self):
+        # a stale or mistyped distance is the failure this catches: the participant sat 10%
+        # further away, so the crop is 10% smaller, but the entered distance did not move
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.write_pair(root, crop_scale=0.85)
+
+            with self.assertRaises(ValueError) as error:
+                self.validated(root)
+
+            self.assertIn("disagrees with the measured distance", str(error.exception))
+
+    def test_a_genuinely_different_distance_passes_the_crop_side_cross_check(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            write_measured_session(root, "training", "training-one", distance_mm=500.0)
+            # further away by a tenth, so the eye renders a tenth smaller: side x distance holds
+            write_measured_session(
+                root, "validation", "development-one",
+                distance_mm=550.0, crop_scale=500.0 / 550.0,
+            )
+
+            evidence = self.validated(root)
+
+            assert evidence is not None
+            self.assertAlmostEqual(
+                evidence["development-one"]["neutral_crop_side_pixels"], 209.4545454545,
+            )
+
+    def test_selection_stability_reports_the_final_twenty_epochs(self):
+        # schema 5 selected 1.508 from a run whose last twenty epochs spanned 0.558, so a score
+        # without its spread is not comparable to another score
+        epochs = [
+            EpochEvaluation(
+                epoch=epoch, learning_rate=1e-3, session_evaluations={},
+                selection_score=1.0 + (epoch % 5) * 0.1,
+                worst_lens_ratio=0.0, worst_p95_ratio=0.0, worst_median_ratio=0.0,
+            )
+            for epoch in range(1, 81)
+        ]
+
+        stability = selection_stability(epochs)
+
+        self.assertEqual(stability["epochs"], 20)
+        self.assertAlmostEqual(stability["minimum"], 1.0)
+        self.assertAlmostEqual(stability["maximum"], 1.4)
+        self.assertAlmostEqual(stability["spread"], 0.4)
 
 
 class CheckpointSelectionTests(unittest.TestCase):

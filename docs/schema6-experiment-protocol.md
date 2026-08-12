@@ -148,6 +148,34 @@ An invalid session is excluded and the next recorded session takes the vacant sl
 split. Every exclusion records which check failed and is made before any model run. Exclusion is
 never based on model error.
 
+### How the added checks are computed
+
+The four checks added by this schema need definitions a reader can reproduce and the trainer can
+compute, so they are declared here rather than left to judgement:
+
+- **the labels come from the measurement.** A session's recorded display geometry must carry the
+  opening measurement as its viewing distance, exactly. This is the check that would have caught
+  schema 5 at load time: it fails whenever screen labels were computed from any distance other
+  than the one measured for that session.
+- **resting pitch.** The setup reading itself is not recorded, so it is recomputed as the median
+  head pitch of the neutral block. That is the same posture measured across 162 samples rather
+  than at one instant, and unlike a setup reading it cannot be satisfied once and then abandoned.
+- **the sitting boundary.** Sixty minutes between one session's completion and the next session's
+  creation. Schema 5's superseded development pair was recorded twelve minutes apart; an hour is
+  long enough that seating has to be re-established, which is the generalisation the development
+  split exists to test.
+- **crop side against distance.** Crop side scales as the inverse of distance, so the compared
+  quantity is the product of a session's neutral-block median crop side and its measured distance.
+  For any two sessions the ratio of those products must lie within `10%` of one.
+
+One consequence is declared here because it changes an existing invariant. Every run requires a
+single recording setup, and that setup hashed the viewing distance. Under schema 6 the distance is
+a per-session measurement by design, so it is removed from the setup binding and replaced by the
+declaration `measured-per-session`; the display geometry, camera format and every contract must
+still match across sessions, and the distance itself is checked per session and between sessions
+by the rules above. Without this change every schema-6 run would be rejected for exactly the
+property the schema exists to introduce.
+
 ## 6. Frozen baseline configuration
 
 Carried forward from schema 5 §6 unchanged, so that the schema-5 result remains a usable comparison
@@ -236,6 +264,20 @@ These must land, with tests, before the first schema-6 recording:
 
 The diagnostics HUD already shows canonical crop side live, which is what makes the cross-check in
 §5 possible.
+
+### Required trainer changes
+
+These must also land before the first recording, because a session that cannot be read is not
+evidence:
+
+1. Accept schema 6 with schema 5's crop contract, manifest columns and pose plan, and reject a run
+   that mixes label-contract versions. Schema-1-to-5 sessions are excluded by that rule alone:
+   their labels declare no distance source, so they cannot share a run with measured labels.
+2. Refuse a session whose measurements are absent, implausible, unattributed to an instrument, in
+   disagreement past `15 mm`, or not the distance its labels were computed from.
+3. Recompute the seating, sitting and crop-side checks in §5 from the recorded rows, and record
+   both measurements with their crop-side readings in every report.
+4. Report the selection-score stability required by §7.
 
 ## 10. Required reports
 
