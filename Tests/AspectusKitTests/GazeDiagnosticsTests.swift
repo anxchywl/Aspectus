@@ -203,6 +203,40 @@ final class DiagnosticsCollectorTests: XCTestCase {
                           fallback: fallback)
     }
 
+    /// crop side is what makes viewing-distance drift observable, and distance is the one label
+    /// input that cannot be measured from the image. A stale reading carried across a stop/start
+    /// would misattribute the previous seating to the next session.
+    func testCropSideAccumulatesAndClearsOnReset() {
+        let c = DiagnosticsCollector()
+        let e = eye()
+        for side in [120.0, 130.0, 140.0] {
+            c.record(GazeSample(frameID: FrameID(0), left: EyeSample(e), right: EyeSample(e),
+                                cropSidePixels: side))
+        }
+
+        XCTAssertEqual(c.snapshot().cropSidePixels.count, 3)
+        XCTAssertEqual(c.snapshot().cropSidePixels.mean, 130, accuracy: 1e-9)
+        XCTAssertEqual(c.snapshot().cropSidePixels.minimum, 120, accuracy: 1e-9)
+        XCTAssertEqual(c.snapshot().cropSidePixels.maximum, 140, accuracy: 1e-9)
+
+        c.reset()
+        XCTAssertEqual(c.snapshot().cropSidePixels.count, 0)
+    }
+
+    /// a frame whose paired-eye alignment could not be formed must not enter the distribution as a
+    /// zero, which would read as the participant having moved far away
+    func testAnUnalignedFrameDoesNotEnterTheCropSideDistribution() {
+        let c = DiagnosticsCollector()
+        let e = eye()
+        c.record(GazeSample(frameID: FrameID(0), left: EyeSample(e), right: EyeSample(e),
+                            cropSidePixels: 130))
+        c.record(GazeSample(frameID: FrameID(1), left: EyeSample(e), right: EyeSample(e),
+                            cropSidePixels: nil))
+
+        XCTAssertEqual(c.snapshot().cropSidePixels.count, 1)
+        XCTAssertEqual(c.snapshot().cropSidePixels.mean, 130, accuracy: 1e-9)
+    }
+
     func testEmptySnapshotIsSafeToDisplay() {
         let s = DiagnosticsCollector().snapshot()
         XCTAssertNil(s.latest)

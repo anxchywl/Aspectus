@@ -96,6 +96,14 @@ public struct GazeSample: Sendable {
     public var irisTravelPixels: Double
     public var fallback: FallbackReason
 
+    /// Mean of the two eyes' canonical crop sides, in source pixels. This is the only observable
+    /// that tracks viewing distance: crop side is a fixed multiple of the eye's own axis length,
+    /// so it scales as 1/distance. macOS reports no camera field of view, so distance cannot be
+    /// recovered from the image alone — but one physical measurement taken alongside this number
+    /// fixes the constant for this camera and participant, and every later reading follows.
+    /// nil whenever the paired-eye alignment could not be formed.
+    public var cropSidePixels: Double?
+
     public init(frameID: FrameID,
                 left: EyeSample? = nil,
                 right: EyeSample? = nil,
@@ -116,7 +124,8 @@ public struct GazeSample: Sendable {
                 blendStrength: Double = 0,
                 correctionAgeMs: Double = 0,
                 irisTravelPixels: Double = 0,
-                fallback: FallbackReason = .none) {
+                fallback: FallbackReason = .none,
+                cropSidePixels: Double? = nil) {
         self.frameID = frameID
         self.left = left
         self.right = right
@@ -138,6 +147,7 @@ public struct GazeSample: Sendable {
         self.correctionAgeMs = correctionAgeMs
         self.irisTravelPixels = irisTravelPixels
         self.fallback = fallback
+        self.cropSidePixels = cropSidePixels
     }
 }
 
@@ -161,6 +171,8 @@ public final class DiagnosticsCollector: @unchecked Sendable {
         public let visionPupilShare: Double
         /// share of tracked frames on which the tracker actually had a head yaw and pitch
         public let headPoseShare: Double
+        /// canonical crop side in source pixels, the observable that tracks viewing distance
+        public let cropSidePixels: ValueStats
         public let fallbackCounts: [FallbackReason: Int]
 
         public static let empty = Snapshot(latest: nil, frames: 0,
@@ -170,6 +182,7 @@ public final class DiagnosticsCollector: @unchecked Sendable {
                                            horizontalPupilOffset: ValueStats(),
                                            correctionAgeMeanMs: 0, correctionAgeP95Ms: 0,
                                            visionPupilShare: 0, headPoseShare: 0,
+                                           cropSidePixels: ValueStats(),
                                            fallbackCounts: [:])
 
         /// the most frequent reason correction did not run, which is the one worth fixing
@@ -195,6 +208,7 @@ public final class DiagnosticsCollector: @unchecked Sendable {
     private var visionPupilObservations = 0
     private var trackedFrames = 0
     private var headPoseFrames = 0
+    private var cropSide = ValueStats()
     private var fallbackCounts: [FallbackReason: Int] = [:]
 
     public init() {}
@@ -215,6 +229,7 @@ public final class DiagnosticsCollector: @unchecked Sendable {
             if sample.headPoseAvailable { headPoseFrames += 1 }
         }
         if let c = sample.gazeConfidence { gazeConfidence.add(c) }
+        if let side = sample.cropSidePixels { cropSide.add(side) }
         for eye in [sample.left, sample.right].compactMap({ $0 }) {
             eyeObservations += 1
             if eye.source == .visionLandmark { visionPupilObservations += 1 }
@@ -239,6 +254,7 @@ public final class DiagnosticsCollector: @unchecked Sendable {
                             ? 0 : Double(visionPupilObservations) / Double(eyeObservations),
                         headPoseShare: trackedFrames == 0
                             ? 0 : Double(headPoseFrames) / Double(trackedFrames),
+                        cropSidePixels: cropSide,
                         fallbackCounts: fallbackCounts)
     }
 
@@ -257,6 +273,7 @@ public final class DiagnosticsCollector: @unchecked Sendable {
         visionPupilObservations = 0
         trackedFrames = 0
         headPoseFrames = 0
+        cropSide.reset()
         fallbackCounts = [:]
     }
 }

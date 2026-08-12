@@ -733,6 +733,13 @@ final class PipelineController: ObservableObject {
                                                    correctionApplied: correctionApplied,
                                                    imageAspect: aspect, tuning: warpTuning)
                 let degrees = 180.0 / Double.pi
+                // the same alignment the dataset recorder writes, so the live reading and the
+                // recorded manifest are the same measurement rather than two similar ones
+                let cropSide = applied.flatMap {
+                    GazeDatasetCanonicalAlignment(left: $0.leftEye, right: $0.rightEye,
+                                                  imageWidth: frame.header.width,
+                                                  imageHeight: frame.header.height)
+                }.map { ($0.left.cropSidePixels + $0.right.cropSidePixels) / 2 }
                 let gazeSample = GazeSample(
                     frameID: frame.header.id,
                     left: applied.map { EyeSample($0.leftEye) },
@@ -754,7 +761,8 @@ final class PipelineController: ObservableObject {
                     blendStrength: weight,
                     correctionAgeMs: ageMs,
                     irisTravelPixels: travelPixels,
-                    fallback: fallback)
+                    fallback: fallback,
+                    cropSidePixels: cropSide)
                 diagnostics.record(gazeSample)
                 if let applied {
                     qualityRecorder?.record(original: frame, corrected: corrected,

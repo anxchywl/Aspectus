@@ -73,6 +73,15 @@ struct DiagnosticsHUD: View {
                 warn: g.frames > 0 && g.headPoseShare < 1)
             row("face conf", stats(g.faceConfidence))
             row("gaze conf", stats(g.gazeConfidence))
+            // viewing distance is the one label input that cannot be measured from the image, and
+            // recording six sessions at a declared 550 mm while actually sitting between roughly
+            // 474 and 574 mm put more error into the labels than the model was being asked to beat.
+            // crop side scales as 1/distance, so this makes that drift visible while it is
+            // happening rather than months later in an offline audit.
+            row("crop side", g.cropSidePixels.count == 0
+                ? "—"
+                : String(format: "%.1f px  [%.1f…%.1f]", g.cropSidePixels.mean,
+                         g.cropSidePixels.minimum, g.cropSidePixels.maximum))
         }
     }
 
