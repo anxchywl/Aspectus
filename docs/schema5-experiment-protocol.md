@@ -271,62 +271,52 @@ another machine, other lighting, or glasses beyond the single participant's usua
 A pass here justifies exactly one thing: proceeding to the frozen manifest and ledger path with a
 candidate that has already passed every gate at all three seeds.
 
-## 11. Amendment 1: measured viewing distance, 2026-08-12
+## 11. Amendment 1: withdrawn, 2026-08-12
 
-Adopted after the section 8 budget closed without a pass, and recorded before any metric is
-computed against a relabelled row. Evidence: `docs/schema5-screening-outcome.md`.
+Proposed and withdrawn the same day, before any metric was computed against a relabelled row. It is
+kept here rather than deleted because the measurement that refuted it constrains what a successor
+protocol may assume. Evidence: `docs/schema5-screening-outcome.md`.
 
-### Why the label contract has to change
+### What was proposed
 
-Screen labels are `atan2(offset_mm, viewingDistanceMM)`. Every schema-5 session declared
-`viewingDistanceMM = 550`, a value typed into Settings rather than measured, because macOS reports
-no camera field of view. Canonical crop side is a fixed multiple of the eye's own axis length and
-therefore scales as `1/distance`; measured per session it spans roughly `474–574 mm`. Two sessions
-labelled the same screen position about `4.4°` apart, and one training session carries `3.47°` of
-label error at the corner target against a `2°` median gate.
+Screen labels are `atan2(offset_mm, viewingDistanceMM)`, and every schema-5 session declared
+`viewingDistanceMM = 550` — typed into Settings, never measured, because macOS reports no camera
+field of view. Canonical crop side scales as `1/distance`, so the amendment proposed recovering a
+per-session distance from crop scale, anchoring it with one physical measurement, and recomputing
+every screen label.
 
-That is not a tuning problem. The training set states contradictory answers for the same input, so
-no setting of any declared factor can satisfy it. The three factors that were screened could only
-move error between development sessions, and every one of them degraded the physical-lens target —
-the only label correct by construction, since looking at the lens is `(0,0)` at any distance.
+### Why it was withdrawn
 
-### What changes
+Crop side does not measure distance. It is a fixed multiple of the eye's own axis length, and that
+length depends on head pose as strongly as it depends on distance:
 
-1. `viewingDistanceMM` stops being a declared constant and becomes a measured per-sample quantity.
-2. `labelContract.version` goes to `2`, adding `distanceSource: "measured-crop-scale"`. Version 1
-   rows and version 2 rows may never be mixed in one run.
-3. Screen labels are recomputed as `atan2(offset_mm, d_i)` where `d_i = k / cropSidePixels_i`.
-4. Lens labels are unchanged and stay exactly `(0,0)`. They are distance-invariant, which is what
-   makes them the reference that exposed this.
+- within-session correlation with head pitch is `r = 0.28` to `0.68`, slope about `0.4 px/deg`
+- within-session correlation with `|yaw|` reaches `r = -0.69`, the foreshortening the crop contract
+  already documents
+- `lookDown` has the largest crop side in all six sessions, because the chin is down
 
-### Fixing the scale constant `k`
+The confound is not a correction term, it is comparable to the signal. Three defensible estimators —
+median over all rows, median over the neutral block, and the neutral block corrected for pitch —
+disagree by up to `72 mm` on the same session. Correcting a corner label to `0.2°` requires distance
+to roughly `1%`, about `5 mm`. The method is about fourteen times too imprecise for its purpose.
 
-Crop side yields exact distance *ratios* and no absolute distance. `k = cropSidePixels × distance_mm`
-is fixed by one physical measurement: eye-to-lens distance taken with a rule while the diagnostics
-HUD `crop side` row is read at the same moment. `k` is a property of this camera and this
-participant's eye geometry, so a single measurement covers every recorded session.
+An anchor was measured with a rule on 2026-08-12: `550 mm` at a simultaneous crop-side reading of
+`128.4 px`, giving `k = 70,620 px·mm`. The anchor is sound and is recorded for reuse. It is not what
+failed; the pose-confounded inference is.
 
-The measurement, its date, the instrument, and the simultaneous crop-side reading are recorded here
-before relabelling. A `k` inferred by fitting model error instead of measuring is forbidden: it
-would select the distance that flatters the model, which is the outcome-driven fitting rule 3 of
-section 4 exists to prevent.
+### What this establishes for a successor protocol
 
-Absolute scale cannot be checked by the gate. Labels and predictions that are wrong by one common
-factor agree with each other, so a purely relative normalisation would pass while leaving the
-deployed correction systematically wrong. The physical anchor is therefore required for
-correctness, not for the gate.
-
-### What is not permitted under this amendment
-
-- No new recording. Rule 7 of section 8 forbids it, and relabelling needs none.
-- No change of session roles. The four training and two development sessions stay as recorded.
-- No reuse of the screening budget. It is closed; the three unspent factors were unavailable rather
-  than untried, and a data redesign does not reopen them.
-- No metric computed on relabelled rows until `k` is measured and recorded above.
-
-### Re-freeze
-
-Once `k` is recorded, the relabelled dataset is re-frozen and section 6 is rerun from the baseline.
-Everything else in this protocol is unchanged: same architecture, seed, gates, selection rule, role
-assignment, and validity checks. Section 5 revalidation must be repeated against the relabelled
-rows, since label values feed the pose-separation and coverage checks.
+1. The label defect is real and measured. The six sessions were not recorded at one distance, and
+   one training session carries about `3.5°` of corner-label error against a `2°` median gate. The
+   labels contradict each other, which is why no declared factor could satisfy them.
+2. The defect cannot be repaired after recording. Viewing distance is not recoverable from the
+   image at the precision labels require, and rule 7 of section 8 forbids a new recording under this
+   protocol.
+3. Therefore schema 5 closes without a pass, and without a repairable dataset.
+4. A successor protocol must measure viewing distance at recording time rather than declaring it,
+   and record it per session alongside the crop-scale reading so drift is detectable. The collector
+   now shows canonical crop side live in the diagnostics HUD, which makes seating drift observable
+   while recording rather than in an offline audit.
+5. The physical-lens target remains the one label that is correct by construction at any distance.
+   Any successor should keep it, and should treat lens-versus-screen error divergence as the first
+   diagnostic for label geometry faults.
