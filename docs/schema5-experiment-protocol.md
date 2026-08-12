@@ -156,6 +156,31 @@ The disagreement filter starts inert deliberately. No threshold is defensible fr
 schema-4 session that has been measured, and adopting one from those numbers would be tuning on an
 observed outcome. It is a declared factor under section 8, not part of the baseline.
 
+### Development-pair supersession, 2026-08-12
+
+The first recorded development pair was set aside before any model run and before any metric was
+computed on any schema-5 session. Both sessions passed every section-5 validity check; they are not
+excluded for failing one.
+
+Training slot 4 was recorded at `08:22`, and the two development sessions at `08:34` and `08:52` —
+one continuous sitting. That satisfies the two-sitting minimum in section 2, because the six
+sessions spanned four sittings overall, but it defeats the purpose section 4 states for the
+ordering rule: a development gate testing transfer to a new sitting rather than memorization within
+one. The pair shared its conditions with the training session recorded twelve minutes earlier.
+
+Superseded, not deleted. The two directories were moved out of the dataset root to
+`gaze-datasets-superseded/` so that neither the collector's slot accounting nor the trainer's
+recursive session discovery sees them, while the recorded data survives for audit:
+
+| set aside | split | rows | recorded |
+|---|---|---|---|
+| `48FD7FEA` | validation | 1,134 | 2026-08-12T08:34:32Z |
+| `45C405EB` | validation | 1,134 | 2026-08-12T08:52:04Z |
+
+The vacant development slots are filled by the next two recorded validation sessions, which must
+come from a sitting later than training slot 4. Because no metric had been computed, this decision
+could not be informed by any session's score, which is the condition rule 3 of section 4 protects.
+
 ### Collector reconciliation, 2026-08-11
 
 This table is the complete set of quality filters. The collector additionally enforced an
