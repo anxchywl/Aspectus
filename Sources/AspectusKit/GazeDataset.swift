@@ -22,6 +22,51 @@ public enum GazeDatasetSchema5 {
     ]
 }
 
+/// Schema 6 differs from schema 5 in one declared factor: viewing distance is measured before and
+/// after each session rather than inherited from a stored preference. Schema 5 reused one typed
+/// constant across every session, so screen labels — which are `atan2(offset_mm, distance)` —
+/// contradicted each other by up to four degrees for the same screen position while the
+/// distance-invariant lens target stayed correct. The manifest columns are unchanged; the
+/// measurements are session metadata, because one distance describes a whole session or the session
+/// is invalid.
+public enum GazeDatasetSchema6 {
+    public static let version = 6
+    public static let manifestColumns = GazeDatasetSchema5.manifestColumns
+
+    /// Pre- and post-session measurements may differ by at most this much. Fifteen millimetres is
+    /// about 3% at a normal seating distance, which holds corner-target label error near 0.2°. A
+    /// larger disagreement means the participant moved enough that no single distance describes the
+    /// session, which is exactly the condition schema 5 recorded silently six times.
+    public static let distanceAgreementToleranceMM = 15.0
+}
+
+/// One physically measured eye-to-lens distance, with the evidence needed to audit it later.
+///
+/// `cropSidePixels` is recorded alongside as a cross-check, never as a label source: canonical crop
+/// side tracks head pose about as strongly as distance, so it cannot be inverted to a distance, but
+/// compared at matched pose across sessions it will catch a stale or mistyped entry.
+public struct GazeDatasetDistanceMeasurement: Codable, Sendable, Equatable {
+    public var millimetres: Double
+    public var instrument: String
+    public var measuredAt: Date
+    /// nil when the tracker had no paired-eye alignment at the moment of measurement
+    public var cropSidePixels: Double?
+
+    public init(millimetres: Double, instrument: String, measuredAt: Date = Date(),
+                cropSidePixels: Double? = nil) {
+        self.millimetres = millimetres
+        self.instrument = instrument
+        self.measuredAt = measuredAt
+        self.cropSidePixels = cropSidePixels
+    }
+
+    /// the same bounds the geometry itself accepts, so an unusable distance cannot start a session
+    public var isPlausible: Bool {
+        millimetres.isFinite && millimetres >= 150 && millimetres <= 2000
+            && !instrument.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
 /// New prompts append, so pose block indices 0-4 keep the meaning every earlier schema recorded.
 public enum GazePosePrompt: String, Codable, Sendable, CaseIterable {
     case neutral
@@ -163,6 +208,10 @@ public struct GazeDatasetLabelContract: Codable, Sendable, Equatable {
     public var origin: String
     public var yawPositive: String
     public var pitchPositive: String
+    /// nil in version 1, where viewing distance was a stored preference rather than a measurement.
+    /// Present from version 2 so a run can refuse to mix declared-distance and measured-distance
+    /// rows: their screen labels are not the same quantity.
+    public var distanceSource: String?
 
     public static let lensAngularV1 = GazeDatasetLabelContract(
         version: 1,
@@ -170,6 +219,14 @@ public struct GazeDatasetLabelContract: Codable, Sendable, Equatable {
         origin: "physical-lens",
         yawPositive: "subject-right",
         pitchPositive: "up")
+
+    public static let lensAngularMeasuredV2 = GazeDatasetLabelContract(
+        version: 2,
+        units: "degrees",
+        origin: "physical-lens",
+        yawPositive: "subject-right",
+        pitchPositive: "up",
+        distanceSource: "measured-per-session")
 }
 
 public struct GazeDatasetHeadPoseContract: Codable, Sendable, Equatable {
@@ -352,22 +409,35 @@ public struct GazeDatasetCanonicalAlignment: Sendable, Equatable {
 /// bound — the protocol declares none, and the collector no longer invents one — so their blocks
 /// stay reachable from any resting position.
 public struct GazeDatasetPosture: Sendable, Equatable {
+    /// Schema 6 requires the camera near eye height. Schema 5 sessions rested between +10.6° and
+    /// +18.9° of pitch because the camera sat below eye level, and that had three measured
+    /// consequences: `lookDown` reached the highest absolute pitch of any block, the pitch-correlated
+    /// eye-axis disagreement left one declared screening factor with no usable operating point, and
+    /// it is the condition under which an undeclared absolute pitch cap made `lookDown` unreachable.
+    public static let restingPitchLimitDegrees = 15.0
+
     public var rollHeadroom: Double
+    public var pitchHeadroom: Double
 
     public init(yawDegrees: Double, pitchDegrees: Double, rollDegrees: Double,
                 gate: GazePosePromptGate.Config = .init()) {
         rollHeadroom = gate.maximumAbsoluteRollDegrees
             - (abs(rollDegrees) + gate.minimumRollChangeDegrees)
+        pitchHeadroom = Self.restingPitchLimitDegrees - abs(pitchDegrees)
     }
 
     public var isReady: Bool { worstHeadroom >= 0 }
 
-    public var worstHeadroom: Double { rollHeadroom }
+    public var worstHeadroom: Double { min(rollHeadroom, pitchHeadroom) }
 
     /// names the axis and which way to move, because "reposition" on its own does not tell anyone
     /// what to actually change
     public var advice: String? {
         guard !isReady else { return nil }
+        if pitchHeadroom <= rollHeadroom {
+            return "the camera sits too far from eye height; raise the display or lower your seat "
+                + "until your resting pitch is under \(Int(Self.restingPitchLimitDegrees))°"
+        }
         return "your head rests tilted to one side; level it before starting"
     }
 }

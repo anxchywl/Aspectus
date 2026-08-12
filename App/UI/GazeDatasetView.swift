@@ -9,6 +9,7 @@ struct GazeDatasetView: View {
     @State private var datasetWindow: NSWindow?
     @State private var isFullScreen = false
     @State private var recorded: (training: Int, validation: Int) = (0, 0)
+    @State private var measuringDistance = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -17,6 +18,8 @@ struct GazeDatasetView: View {
                 switch controller.datasetProgress?.status {
                 case .collecting:
                     collecting(in: geometry.size)
+                case .awaitingClosingDistance:
+                    closingMeasurementPrompt
                 case .finished:
                     outcome(title: "Session complete", systemImage: "checkmark.circle.fill",
                             tint: .green,
@@ -61,12 +64,51 @@ struct GazeDatasetView: View {
                 controller.cancelGazeDataset()
             }
         }
+        .sheet(isPresented: $measuringDistance) {
+            GazeDistanceSheet(stage: .opening,
+                              cropSidePixels: controller.currentCropSidePixels(),
+                              onConfirm: { measurement in
+                                  measuringDistance = false
+                                  controller.startGazeDataset(nextSplit, distance: measurement)
+                              },
+                              onCancel: { measuringDistance = false })
+        }
         .alert("Delete all model data?", isPresented: $confirmingDelete) {
             Button("Delete", role: .destructive) { controller.deleteGazeDatasets() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This permanently removes every recorded eye crop, manifest and participant ID. "
                  + "It cannot be recovered from Trash.")
+        }
+    }
+
+    /// Every target is recorded, but the session is not finished. One distance describes a session
+    /// only if it still holds at the end, so this is deliberately not skippable: leaving without
+    /// measuring leaves the session unfinished rather than quietly finished on an assumption.
+    private var closingMeasurementPrompt: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "ruler").font(.system(size: 46)).foregroundStyle(.cyan)
+            Text("All targets recorded").font(.largeTitle.weight(.semibold))
+            Text("Measure the eye-to-lens distance once more, without shifting in your seat. "
+                 + "The session is finished only if it still matches the opening measurement.")
+                .font(.title3).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center).frame(maxWidth: 560)
+            if let snapshot = controller.datasetProgress {
+                Text("\(snapshot.totalSamples) samples · \(snapshot.split.rawValue)")
+                    .font(.callout.monospaced()).foregroundStyle(.secondary)
+            }
+            Button("Measure now") { measuringDistance = true }
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(40)
+        .sheet(isPresented: $measuringDistance) {
+            GazeDistanceSheet(stage: .closing(openingMM: controller.openingDistanceMM ?? 0),
+                              cropSidePixels: controller.currentCropSidePixels(),
+                              onConfirm: { measurement in
+                                  measuringDistance = false
+                                  controller.closeGazeDataset(distance: measurement)
+                              },
+                              onCancel: { measuringDistance = false })
         }
     }
 
@@ -105,6 +147,19 @@ struct GazeDatasetView: View {
     private var protocolComplete: Bool {
         recorded.training >= Self.trainingSlots && recorded.validation >= Self.validationSlots
     }
+
+    /// Schema 6 refuses an unusable seating rather than warning about it. Schema 5 warned, and
+    /// six sessions were recorded from a camera below eye height anyway — which is how a declared
+    /// screening factor ended up with no usable operating point. nil means the tracker has not seen
+    /// a face yet, which is also not a state collection may start from.
+    private var seating: GazeDatasetPosture? {
+        guard let sample = controller.gaze.latest, sample.headPoseAvailable else { return nil }
+        return GazeDatasetPosture(yawDegrees: sample.headYawDegrees,
+                                  pitchDegrees: sample.headPitchDegrees,
+                                  rollDegrees: sample.headRollDegrees)
+    }
+
+    private var seatingReady: Bool { seating?.isReady == true }
 
     private var nextSplit: GazeDatasetSplit {
         recorded.training < Self.trainingSlots ? .training : .validation
@@ -173,8 +228,8 @@ struct GazeDatasetView: View {
     private var setupActions: some View {
         VStack(spacing: 14) {
             Text(recorded.training + recorded.validation == 0
-                 ? "no schema-\(GazeDatasetSchema5.version) sessions recorded yet"
-                 : "schema-\(GazeDatasetSchema5.version) sessions so far: "
+                 ? "no schema-\(GazeDatasetSchema6.version) sessions recorded yet"
+                 : "schema-\(GazeDatasetSchema6.version) sessions so far: "
                    + "\(recorded.training) training · \(recorded.validation) validation")
                 .font(.callout.monospaced()).foregroundStyle(.tertiary)
 
@@ -185,12 +240,13 @@ struct GazeDatasetView: View {
                     .multilineTextAlignment(.center).frame(maxWidth: 460)
             } else if isFullScreen {
                 Button("Start \(nextSplit == .training ? "training" : "validation") session") {
-                    controller.startGazeDataset(nextSplit)
+                    measuringDistance = true
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!controller.isRunning)
-                .help(controller.isRunning
-                      ? "Begin collecting" : "The camera has to be running first")
+                .disabled(!controller.isRunning || !seatingReady)
+                .help(!controller.isRunning ? "The camera has to be running first"
+                      : seatingReady ? "Measure the eye-to-lens distance, then begin"
+                      : seating?.advice ?? "Waiting for the tracker to find your face")
             } else {
                 Button("Enter full screen") { datasetWindow?.toggleFullScreen(nil) }
                     .buttonStyle(.borderedProminent)
@@ -509,7 +565,7 @@ struct GazeDatasetView: View {
                 .appendingPathComponent("session.json")
             guard let data = try? Data(contentsOf: metadata),
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  object["schemaVersion"] as? Int == GazeDatasetSchema5.version,
+                  object["schemaVersion"] as? Int == GazeDatasetSchema6.version,
                   object["status"] as? String == "finished",
                   let split = object["split"] as? String else { continue }
             if split == GazeDatasetSplit.training.rawValue { training += 1 }

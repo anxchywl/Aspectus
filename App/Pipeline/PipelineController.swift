@@ -469,7 +469,18 @@ final class PipelineController: ObservableObject {
 
     // MARK: - gaze model dataset
 
-    func startGazeDataset(_ split: GazeDatasetSplit) {
+    /// The canonical crop side the tracker is seeing right now, recorded alongside a distance
+    /// measurement as an auditable cross-check. It is never inverted into a distance: crop side
+    /// tracks head pose about as strongly as distance.
+    func currentCropSidePixels() -> Double? {
+        gaze.cropSidePixels.count > 0 ? gaze.cropSidePixels.mean : nil
+    }
+
+    /// Schema 6 labels screen targets from a measured distance rather than the stored preference.
+    /// Passing the measurement in, instead of reading `viewingDistanceMM`, is the whole point: a
+    /// preference set once and silently reused is what put contradictory labels into schema 5.
+    func startGazeDataset(_ split: GazeDatasetSplit,
+                          distance: GazeDatasetDistanceMeasurement) {
         // a silent return here reads as a dead button: collection needs live frames, so say so
         guard isRunning else {
             datasetError = "Start the camera before collecting."
@@ -483,8 +494,10 @@ final class PipelineController: ObservableObject {
         do {
             try datasetRecorder.start(
                 split: split,
-                geometry: DisplayGeometry.datasetGeometry(viewingDistanceMM: viewingDistanceMM),
-                cameraFormat: capture.activeFormatDescription)
+                geometry: DisplayGeometry.datasetGeometry(
+                    viewingDistanceMM: distance.millimetres),
+                cameraFormat: capture.activeFormatDescription,
+                openingDistance: distance)
             datasetProgress = datasetRecorder.snapshot()
             datasetTimer?.invalidate()
             datasetTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
@@ -493,6 +506,15 @@ final class PipelineController: ObservableObject {
         } catch {
             datasetError = error.localizedDescription
         }
+    }
+
+    /// the opening measurement of the session in progress, so the closing prompt can show what it
+    /// has to agree with
+    var openingDistanceMM: Double? { datasetRecorder.openingDistanceMM }
+
+    func closeGazeDataset(distance: GazeDatasetDistanceMeasurement) {
+        datasetRecorder.closeWithMeasuredDistance(distance)
+        refreshGazeDataset()
     }
 
     func cancelGazeDataset() {

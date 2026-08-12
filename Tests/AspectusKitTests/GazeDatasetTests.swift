@@ -142,6 +142,22 @@ final class GazeDatasetAcceptanceTests: XCTestCase {
 }
 
 final class GazeDatasetPostureTests: XCTestCase {
+    /// Schema 6 requires the camera near eye height. Schema 5 recorded every session between
+    /// +10.6 and +18.9 degrees of resting pitch, which is what pushed lookDown to the highest
+    /// absolute pitch of any block and left the disagreement filter with no usable operating point.
+    func testASeatingBelowEyeHeightIsRefusedRatherThanWarned() {
+        let low = GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 18.9, rollDegrees: 0)
+
+        XCTAssertFalse(low.isReady)
+        XCTAssertEqual(low.pitchHeadroom, -3.9, accuracy: 1e-9)
+        XCTAssertEqual(low.advice?.contains("eye height"), true)
+    }
+
+    func testTheRestingPitchBoundaryIsReachableButHasNoMargin() {
+        XCTAssertTrue(GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 15, rollDegrees: 0).isReady)
+        XCTAssertFalse(GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 15.5, rollDegrees: 0).isReady)
+    }
+
     func testLevelSeatingLeavesRoomForEveryBlock() {
         let posture = GazeDatasetPosture(yawDegrees: 2, pitchDegrees: 4, rollDegrees: 1)
 
@@ -149,14 +165,20 @@ final class GazeDatasetPostureTests: XCTestCase {
         XCTAssertNil(posture.advice)
     }
 
-    /// The measured session that exposed the cap: a +21.2 degree neutral baseline. With no
-    /// absolute pitch bound this seating reaches every block, so it must not be reported as a
-    /// blocker any more.
-    func testAHighRestingPitchNowReachesTheChinDownBlock() {
+    /// The measured session that exposed the cap: a +21.2 degree neutral baseline.
+    ///
+    /// Two separate facts meet here and must stay distinguishable. Chin-down is *reachable* from
+    /// this seating, because acceptance carries no absolute pitch bound any more — that is the
+    /// schema-5 bug, and it must not come back. Schema 6 still declines the seating, but on
+    /// eye-height grounds it declares openly, not because a block cannot be completed. A refusal
+    /// citing reachability here would mean the old cap had returned in a new disguise.
+    func testAHighRestingPitchIsReachableButRefusedOnEyeHeight() {
         let posture = GazeDatasetPosture(yawDegrees: 0, pitchDegrees: 21.2, rollDegrees: 0)
 
-        XCTAssertTrue(posture.isReady)
-        XCTAssertNil(posture.advice)
+        XCTAssertGreaterThanOrEqual(posture.rollHeadroom, 0,
+                                    "no block is unreachable from this seating")
+        XCTAssertFalse(posture.isReady)
+        XCTAssertEqual(posture.advice?.contains("eye height"), true)
     }
 
     func testATurnedRestingYawStillReachesEveryBlock() {
@@ -446,5 +468,68 @@ final class GazeDatasetSettleGateTests: XCTestCase {
                                    now: 11, settleSeconds: 1))
         XCTAssertFalse(gate.isReady(targetID: 5, accepted: true,
                                     now: 11.1, settleSeconds: 1))
+    }
+}
+
+/// Schema 6 exists because schema 5 took viewing distance from a preference typed once and reused
+/// unchanged, so screen labels disagreed with each other for the same screen position.
+final class GazeDatasetDistanceMeasurementTests: XCTestCase {
+    private func measurement(_ mm: Double, instrument: String = "tape measure")
+        -> GazeDatasetDistanceMeasurement {
+        GazeDatasetDistanceMeasurement(millimetres: mm, instrument: instrument,
+                                       cropSidePixels: 128.4)
+    }
+
+    func testAPlausibleMeasurementNeedsBothADistanceAndAnInstrument() {
+        XCTAssertTrue(measurement(550).isPlausible)
+        XCTAssertFalse(measurement(550, instrument: "").isPlausible,
+                       "the instrument is part of the record, not decoration")
+        XCTAssertFalse(measurement(550, instrument: "   ").isPlausible)
+    }
+
+    func testAnUnusableDistanceCannotStartASession() {
+        XCTAssertFalse(measurement(0).isPlausible)
+        XCTAssertFalse(measurement(100).isPlausible)
+        XCTAssertFalse(measurement(2500).isPlausible)
+        XCTAssertFalse(measurement(.nan).isPlausible)
+        XCTAssertFalse(measurement(.infinity).isPlausible)
+    }
+
+    /// the tolerance is the whole point of measuring twice: it decides whether one distance
+    /// describes the session at all
+    func testTheAgreementToleranceIsFifteenMillimetres() {
+        XCTAssertEqual(GazeDatasetSchema6.distanceAgreementToleranceMM, 15)
+    }
+
+    func testTheLabelContractDeclaresWhereTheDistanceCameFrom() {
+        XCTAssertNil(GazeDatasetLabelContract.lensAngularV1.distanceSource,
+                     "version 1 inherited a stored preference and never recorded a source")
+        XCTAssertEqual(GazeDatasetLabelContract.lensAngularMeasuredV2.distanceSource,
+                       "measured-per-session")
+        XCTAssertEqual(GazeDatasetLabelContract.lensAngularMeasuredV2.version, 2)
+    }
+
+    /// schema 6 changes labels, not rows: the same manifest columns describe both
+    func testSchemaSixKeepsTheSchemaFiveManifestColumns() {
+        XCTAssertEqual(GazeDatasetSchema6.version, 6)
+        XCTAssertEqual(GazeDatasetSchema6.manifestColumns, GazeDatasetSchema5.manifestColumns)
+    }
+
+    /// the measured distance must reach the labels, or measuring it changes nothing
+    func testScreenLabelsFollowTheMeasuredDistance() {
+        let target = GazeDatasetTarget(id: 0, kind: .screen, xFraction: 0.9, yFraction: 0.9,
+                                       pose: .neutral)
+        let declared = GazeDatasetGeometry(displayWidthMM: 326.57, displayHeightMM: 211.36,
+                                           viewingDistanceMM: 550)
+        let measured = GazeDatasetGeometry(displayWidthMM: 326.57, displayHeightMM: 211.36,
+                                           viewingDistanceMM: 474)
+
+        guard let a = declared.angles(for: target), let b = measured.angles(for: target) else {
+            return XCTFail("both geometries are usable")
+        }
+        // the schema-5 defect, measured: one training session sat at about 474 mm while labelled
+        // 550, and the corner target's label was wrong by more than the 2 degree median gate
+        let error = (a.yaw - b.yaw).magnitude + (a.pitch - b.pitch).magnitude
+        XCTAssertGreaterThan(error, 2.0)
     }
 }

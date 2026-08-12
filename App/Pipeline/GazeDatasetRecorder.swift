@@ -11,6 +11,9 @@ import AspectusKit
 final class GazeDatasetRecorder: @unchecked Sendable {
     enum Status: Sendable, Equatable {
         case collecting
+        /// every target is recorded, but the session is not finished until the post-session
+        /// distance has been measured and agrees with the pre-session one
+        case awaitingClosingDistance
         case finished
         case cancelled
         case failed(String)
@@ -40,12 +43,15 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         case alreadyCollecting
         case applicationSupportUnavailable
         case displayGeometryUnavailable
+        case distanceNotMeasured
 
         var errorDescription: String? {
             switch self {
             case .alreadyCollecting: return "a gaze dataset session is already running"
             case .applicationSupportUnavailable: return "Application Support is unavailable"
             case .displayGeometryUnavailable: return "the display geometry is unavailable"
+            case .distanceNotMeasured:
+                return "measure the eye-to-lens distance before collecting"
             }
         }
     }
@@ -59,7 +65,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
             case .invalidEyeEvidence:
                 return "the eye alignment evidence is unavailable for the sample"
             case .invalidManifestContract:
-                return "the schema 5 manifest fields do not match the declared contract"
+                return "the schema 6 manifest fields do not match the declared contract"
             }
         }
     }
@@ -84,6 +90,9 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         var cropContract: GazeDatasetCropContract
         var labelContract: GazeDatasetLabelContract
         var headPoseContract: GazeDatasetHeadPoseContract
+        /// measured before the first target, and again after the last
+        var openingDistance: GazeDatasetDistanceMeasurement
+        var closingDistance: GazeDatasetDistanceMeasurement?
     }
 
     private struct Session {
@@ -108,6 +117,8 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         var startedAtHost: Double
         var posePromptGate = GazePosePromptGate()
         var settleGate = GazeDatasetSettleGate()
+        var openingDistance: GazeDatasetDistanceMeasurement
+        var closingDistance: GazeDatasetDistanceMeasurement?
 
         var isCollecting: Bool { status == .collecting }
     }
@@ -131,7 +142,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
     private static let imageWidth = GazeDatasetCanonicalAlignment.outputWidth
     private static let imageHeight = GazeDatasetCanonicalAlignment.outputHeight
     private static let manifestHeader =
-        GazeDatasetSchema5.manifestColumns.joined(separator: ",") + "\n"
+        GazeDatasetSchema6.manifestColumns.joined(separator: ",") + "\n"
 
     private let state = OSAllocatedUnfairLock(initialState: State())
     private let context = CIContext(options: [.cacheIntermediates: false])
@@ -150,6 +161,10 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         state.withLock { $0.session?.isCollecting == true }
     }
 
+    var openingDistanceMM: Double? {
+        state.withLock { $0.session?.openingDistance.millimetres }
+    }
+
     var rootURL: URL? {
         if let rootOverride { return rootOverride }
         guard let base = try? FileManager.default.url(for: .applicationSupportDirectory,
@@ -161,8 +176,10 @@ final class GazeDatasetRecorder: @unchecked Sendable {
     }
 
     func start(split: GazeDatasetSplit, geometry: GazeDatasetGeometry?,
-               cameraFormat: String, now: Double = HostClock.seconds) throws {
+               cameraFormat: String, openingDistance: GazeDatasetDistanceMeasurement,
+               now: Double = HostClock.seconds) throws {
         guard !isCollecting else { throw StartError.alreadyCollecting }
+        guard openingDistance.isPlausible else { throw StartError.distanceNotMeasured }
         queue.sync {}
         guard let geometry, geometry.isUsable else { throw StartError.displayGeometryUnavailable }
         guard let rootURL else { throw StartError.applicationSupportUnavailable }
@@ -188,9 +205,37 @@ final class GazeDatasetRecorder: @unchecked Sendable {
                               geometry: geometry, directory: directory,
                               cameraFormat: cameraFormat,
                               targets: GazeDatasetPlan.targets(for: split),
-                              startedAtHost: now)
+                              startedAtHost: now,
+                              openingDistance: openingDistance)
         try writeMetadata(session, completedAt: nil)
         state.withLock { $0.session = session }
+    }
+
+    /// Finalises a session that has recorded every target. The session becomes finished only if
+    /// the closing distance agrees with the opening one; otherwise it is failed, because a session
+    /// the participant moved through has no single distance and therefore no correct screen labels.
+    func closeWithMeasuredDistance(_ closing: GazeDatasetDistanceMeasurement) {
+        let finalised = state.withLock { state -> Session? in
+            guard var session = state.session,
+                  session.status == .awaitingClosingDistance else { return nil }
+            session.closingDistance = closing
+            let drift = abs(closing.millimetres - session.openingDistance.millimetres)
+            if !closing.isPlausible {
+                session.status = .failed("the closing distance measurement is not usable")
+            } else if drift > GazeDatasetSchema6.distanceAgreementToleranceMM {
+                session.status = .failed(String(
+                    format: "seating moved during the session: %.0f mm at the start and %.0f mm at "
+                          + "the end, a %.0f mm change against a %.0f mm limit. No single distance "
+                          + "describes it, so the screen labels would be wrong.",
+                    session.openingDistance.millimetres, closing.millimetres, drift,
+                    GazeDatasetSchema6.distanceAgreementToleranceMM))
+            } else {
+                session.status = .finished
+            }
+            state.session = session
+            return session
+        }
+        if let finalised { try? writeMetadata(finalised, completedAt: Date()) }
     }
 
     func cancel() {
@@ -354,7 +399,9 @@ final class GazeDatasetRecorder: @unchecked Sendable {
                 }
             }
             if session.targetIndex >= session.targets.count {
-                session.status = .finished
+                // not finished yet: one distance describes a session only if it still holds at the
+                // end, so the closing measurement decides whether this is a session or a discard
+                session.status = .awaitingClosingDistance
             }
             state.session = session
             return session.isCollecting ? nil : session
@@ -409,7 +456,7 @@ final class GazeDatasetRecorder: @unchecked Sendable {
 
         let degrees = 180.0 / Double.pi
         let fields = [
-            "schema_version": "\(GazeDatasetSchema5.version)",
+            "schema_version": "\(GazeDatasetSchema6.version)",
             "participant_id": csv(reservation.participantID),
             "session_id": csv(reservation.sessionID),
             "split": reservation.split.rawValue,
@@ -461,10 +508,10 @@ final class GazeDatasetRecorder: @unchecked Sendable {
     }
 
     static func manifestRow(_ fields: [String: String]) throws -> String {
-        guard fields.count == GazeDatasetSchema5.manifestColumns.count else {
+        guard fields.count == GazeDatasetSchema6.manifestColumns.count else {
             throw WriteError.invalidManifestContract
         }
-        return try GazeDatasetSchema5.manifestColumns.map { column in
+        return try GazeDatasetSchema6.manifestColumns.map { column in
             guard let value = fields[column] else { throw WriteError.invalidManifestContract }
             return value
         }.joined(separator: ",") + "\n"
@@ -515,11 +562,12 @@ final class GazeDatasetRecorder: @unchecked Sendable {
         let status: String
         switch session.status {
         case .collecting: status = "collecting"
+        case .awaitingClosingDistance: status = "awaitingClosingDistance"
         case .finished: status = "finished"
         case .cancelled: status = "cancelled"
         case .failed: status = "failed"
         }
-        let metadata = Metadata(schemaVersion: GazeDatasetSchema5.version,
+        let metadata = Metadata(schemaVersion: GazeDatasetSchema6.version,
                                 participantID: session.participantID,
                                 sessionID: session.id, split: session.split,
                                 createdAt: session.createdAt, completedAt: completedAt,
@@ -532,8 +580,10 @@ final class GazeDatasetRecorder: @unchecked Sendable {
                                 sourceImageWidth: session.sourceImageWidth,
                                 sourceImageHeight: session.sourceImageHeight,
                                 cropContract: .canonicalPairedEyesV2,
-                                labelContract: .lensAngularV1,
-                                headPoseContract: .visionRevision3DegreesV1)
+                                labelContract: .lensAngularMeasuredV2,
+                                headPoseContract: .visionRevision3DegreesV1,
+                                openingDistance: session.openingDistance,
+                                closingDistance: session.closingDistance)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
